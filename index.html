@@ -35,68 +35,150 @@ const C = {
   success:'#4CAF82',warn:'#E8834A',danger:'#E05252'
 };
 const SITE_PASSWORD = 'mts2025';
-const MTS_PROMPT = `You are a meeting summary assistant for Momen Tax Services (MTS). Your job is to read a meeting transcript and/or agenda and produce a formatted meeting summary.
+const SB_URL = 'https://ykowuicymemzrhhfaiqz.supabase.co';
+const SB_KEY = localStorage.getItem('mts_sb_key') || '';
+const MTS_PROMPT = 'You are a meeting summary assistant for Momen Tax Services (MTS). Your job is to read a meeting transcript and/or agenda and produce a formatted meeting summary.\n\nROLE & CONTEXT\n- All meetings are hosted by Jasmine Hajimomen (founder)\n- Kevina Tweddle: client onboarding specialist; sends engagement letters, portal links, and follow-up emails — sign emails as "Kevina Tweddle / Client Onboarding Specialist / Momen Tax Services" when she is the sender\n- Emely: client communications and implementation\n- Danny: accounting, bookkeeping, payroll setup, QuickBooks, recurring transfers\n- Atenas: internal operations, payroll backdating questions\n- Tools used: Canopy (CRM and client portal), QuickBooks, ADP (payroll), GoHighLevel, Notion\n- Clients may have multiple entities (S-Corps, Partnerships, LLCs, sole props) — treat each entity separately in notes\n\nSUMMARY STRUCTURE — produce sections in this exact order:\n1. Notes/Questions — Direct answers and findings only. Never restate the question. Lead with the answer. Use full explanatory bullets (not just one-liners) when accounting or tax context requires it. If a question was not addressed, write "Not discussed — to be addressed at next meeting." If there is no agenda, summarize key discussion points by entity or topic.\n2. Client Next Steps — Action items for the client only. Concise bullets. Use numbered list if 5 or more items.\n3. MTS Tasks — Internal action items with owner name prefix (e.g. "Danny: Set up recurring transfer..."). Include specific dollar amounts, frequencies, account names, dates, and entity names wherever mentioned. Be as specific as the transcript allows.\n4. Suggested Next Meeting Agenda — Max 5 bullets. Forward-looking only, not a recap. Continue entity-by-entity reviews if the accounting walkthrough was not completed.\n5. Follow-Up Email — Written and ready to send. Always note the correct sender.\n\nWHAT NOT TO INCLUDE\n- No preliminary tax results tables or number sections unless directly discussed\n- No "Key Points" or "General Notes" sections\n- Do not repeat anything already in the agenda\n- Do not over-explain — keep bullets action-oriented\n\nEMAIL RULES\n- Open: "Hi [Name], Thank you for your time in meeting with Jasmine yesterday." (use "today" if same-day)\n- Short 1-2 sentence purpose paragraph\n- MTS action paragraph explaining what MTS is doing (be specific — name entities, amounts, and dates)\n- Client action list (bullets for <5 items, numbered for 5+ items)\n- If an IRS or government notice is involved: remind client NOT to pay until MTS reviews, and reference uploading to Canopy portal\n- Final line: "As always, please don\'t hesitate to reach out — we are always an email or phone call away."\n- Sign off: Warm regards / [Sender Full Name] / [Title] / Momen Tax Services\n- Default sender is Kevina Tweddle / Client Onboarding Specialist unless otherwise specified\n- No em dashes — use commas instead\n\nEMAIL TONE BY CLIENT TYPE\n- Lauryn-style: Include a Jasmine update paragraph if there is a specific blocker (e.g. payroll cannot start until prior taxes are paid)\n- Sarah-style: Reference sharing the P&L / QuickBooks access; keep it short\n- Brandon-style: Use numbered list; include franchise tax payment permission confirmation\n- Hank-style: Reference specific account used for payment; note W4s uploaded; e-signature request and engagement letter + invoice link as separate items\n- Multi-entity clients (like Dr. Rue): Be specific about which entity each transfer, payroll, or action applies to\n\nFLAGS & WATCH ITEMS — flag any of the following:\n- IRS or FTB notices (advise client not to pay until reviewed)\n- Incomplete accounting walkthroughs (note which entities were not reviewed)\n- Elevated tax liability from high profitability\n- Reclassifications still in progress\n- Missing documents or source data\n- Anything requiring Jasmine\'s specific attention or decision\n\nQUALITY CHECK (apply before producing output)\n- Did I answer every agenda question directly?\n- Did I include entity names and dollar amounts in MTS tasks?\n- Is the email warm, specific, and non-templated?\n- Are MTS tasks assigned to a specific person (Danny, Kevina, Atenas, etc.)?\n- Is the suggested agenda forward-looking and continuing unfinished work?\n\nOUTPUT: Respond ONLY with valid JSON, no markdown fences:\n{\n  "clientName": "string",\n  "meetingDate": "string",\n  "meetingType": "string (e.g. Accounting Review, Tax Planning, Onboarding, Payroll Review)",\n  "hostedBy": "Momen Tax Services",\n  "attendees": "string (e.g. Jasmine, Danny, Atenas)",\n  "summary": "2-3 sentence plain English overview — include entity names and key figures",\n  "notesAndQuestions": ["string — answer only, no restating the question, full context where needed"],\n  "clientNextSteps": ["string"],\n  "mtsTasks": ["string — always start with owner name e.g. Danny: or Kevina:"],\n  "nextAgenda": ["string — max 5, forward-looking, continue unfinished entity reviews"],\n  "followUpEmail": { "subject": "string", "body": "string" },\n  "flags": ["string — IRS notices, incomplete reviews, elevated liability, missing docs"],\n  "ghostItems": ["string — unresolved items from prior sessions if any"],\n  "clientProfile": {\n    "phone": "string or Unknown",\n    "email": "string or Unknown",\n    "businesses": ["list of all entity names mentioned"],\n    "industry": "string or Unknown",\n    "filingStatus": "string or Unknown",\n    "spouse": "string or Unknown",\n    "serviceType": "string or Unknown (e.g. TAS, CAS, Tax Prep, Bookkeeping, Accounting Review)",\n    "lastMeetingDate": "string or Unknown",\n    "notes": "2-3 sentence plain text overview starting with the client name, no labels or bold"\n  }\n}`';
 
-ROLE & CONTEXT
-- All meetings are hosted by Jasmine Hajimomen (founder)
-- Kevina: client onboarding specialist; sends engagement letters and follow-up emails
-- Emely: client communications and implementation
-- Danny: accounting and payroll setup
-- Atenas: internal operations; check with her on payroll backdating questions
-- Tools used: Canopy (CRM), QuickBooks, ADP (payroll), GoHighLevel, Notion
+// ── Supabase helpers ─────────────────────────────────────────────────────────
+function sbHeaders(key) {
+  return {
+    'apikey': key || SB_KEY,
+    'Authorization': 'Bearer ' + (key || SB_KEY),
+    'Content-Type': 'application/json',
+    'Prefer': 'return=representation'
+  };
+}
+async function sbGet(table, params, key) {
+  var url = SB_URL + '/rest/v1/' + table + '?';
+  var qp = Object.entries(params||{}).map(function(e){return e[0]+'='+encodeURIComponent(e[1]);}).join('&');
+  var r = await fetch(url + qp, {headers: sbHeaders(key)});
+  if(!r.ok) throw new Error('Supabase GET error: ' + r.status);
+  return r.json();
+}
+async function sbPost(table, data, key) {
+  var r = await fetch(SB_URL + '/rest/v1/' + table, {
+    method: 'POST', headers: sbHeaders(key), body: JSON.stringify(data)
+  });
+  if(!r.ok) throw new Error('Supabase POST error: ' + r.status);
+  var res = await r.json();
+  return Array.isArray(res) ? res[0] : res;
+}
+async function sbPatch(table, data, match, key) {
+  var url = SB_URL + '/rest/v1/' + table + '?';
+  var qp = Object.entries(match).map(function(e){return e[0]+'=eq.'+encodeURIComponent(e[1]);}).join('&');
+  var r = await fetch(url + qp, {
+    method: 'PATCH', headers: sbHeaders(key), body: JSON.stringify(data)
+  });
+  if(!r.ok) throw new Error('Supabase PATCH error: ' + r.status);
+  return r.json();
+}
+async function sbDelete(table, match, key) {
+  var url = SB_URL + '/rest/v1/' + table + '?';
+  var qp = Object.entries(match).map(function(e){return e[0]+'=eq.'+encodeURIComponent(e[1]);}).join('&');
+  var r = await fetch(url + qp, {method: 'DELETE', headers: sbHeaders(key)});
+  if(!r.ok) throw new Error('Supabase DELETE error: ' + r.status);
+}
 
-SUMMARY STRUCTURE — produce sections in this exact order:
-1. Notes/Questions — Direct answers to agenda questions only. Never restate the question. Lead with the answer. If a question was not addressed, write "Not discussed — to be addressed at next meeting."
-2. Client Next Steps — Action items for the client only. Concise bullets.
-3. MTS Tasks — Internal action items. Include specific backdating strategies, billing items, payroll actions, and follow-up deliverables.
-4. Suggested Next Meeting Agenda — Max 5 bullets. Forward-looking only, not a recap.
-5. Follow-Up Email — Written and ready to send.
-
-EMAIL RULES
-- Open: "Hi [Name], Thank you for your time in meeting with Jasmine yesterday."
-- Short 1-2 sentence purpose paragraph
-- MTS action paragraph
-- Client action list (bullets for <5 items, numbered for 5+)
-- Final line: "As always, please don't hesitate to reach out — we are always an email or phone call away."
-- Sign off: Warm regards / [First Last] / [Title] / Momen Tax Services
-- No em dashes — use commas instead
-
-EMAIL TONE BY CLIENT TYPE
-- Lauryn-style: Include a Jasmine update paragraph if there is a specific blocker
-- Sarah-style: Reference sharing the P&L / QuickBooks access; keep it short
-- Brandon-style: Use numbered list; include franchise tax payment permission confirmation
-- Hank-style: Reference specific account used for payment; note W4s uploaded; e-signature request and engagement letter + invoice link as separate items
-
-OUTPUT: Respond ONLY with valid JSON, no markdown fences:
-{
-  "clientName": "string",
-  "meetingDate": "string",
-  "meetingType": "string",
-  "hostedBy": "Momen Tax Services",
-  "summary": "2-3 sentence plain English overview",
-  "notesAndQuestions": ["string"],
-  "clientNextSteps": ["string"],
-  "mtsTasks": ["string"],
-  "nextAgenda": ["string"],
-  "followUpEmail": { "subject": "string", "body": "string" },
-  "flags": ["string"],
-  "ghostItems": ["string"],
-  "clientProfile": {
-    "phone": "string or Unknown",
-    "email": "string or Unknown",
-    "businesses": ["string"],
-    "industry": "string or Unknown",
-    "filingStatus": "string or Unknown",
-    "spouse": "string or Unknown",
-    "serviceType": "string or Unknown (e.g. Tax Prep, TAS, CAS, Bookkeeping)",
-    "lastMeetingDate": "string or Unknown",
-    "notes": "2-3 sentence client overview — plain text only, no bold, no labels, just start directly with the client's name"
+// ── Supabase client/session operations ────────────────────────────────────────
+async function sbGetOrCreateClient(name, key) {
+  var results = await sbGet('clients', {'name': 'eq.'+name, 'limit': '1'}, key);
+  if(results && results.length) return results[0];
+  return sbPost('clients', {name: name, profile: {}, open_items: []}, key);
+}
+async function sbLoadClient(name, key) {
+  var clients = await sbGet('clients', {'name': 'eq.'+name, 'limit': '1'}, key);
+  if(!clients || !clients.length) return null;
+  var client = clients[0];
+  var sessions = await sbGet('sessions', {'client_id': 'eq.'+client.id, 'order': 'created_at.asc'}, key);
+  var ghosts = await sbGet('ghost_items', {'client_id': 'eq.'+client.id, 'resolved': 'eq.false'}, key);
+  // Map DB sessions to app format
+  var mappedSessions = (sessions||[]).map(function(s){
+    return {
+      id: s.id,
+      date: s.meeting_date,
+      meetingType: s.meeting_type,
+      attendees: s.attendees,
+      summary: s.summary,
+      notesAndQuestions: s.notes_and_questions,
+      clientNextSteps: s.client_next_steps,
+      mtsTasks: s.mts_tasks,
+      nextAgenda: s.next_agenda,
+      followUpEmail: s.follow_up_email,
+      flags: s.flags,
+      ghostItems: s.ghost_items
+    };
+  });
+  return {
+    id: client.id,
+    profile: client.profile || {},
+    openItems: (ghosts||[]).map(function(g){return g.summary;}),
+    sessions: mappedSessions
+  };
+}
+async function sbListClients(key) {
+  var results = await sbGet('clients', {'order': 'name.asc', 'select': 'name'}, key);
+  return (results||[]).map(function(c){return c.name;});
+}
+async function sbSaveSession(clientName, sessionData, key) {
+  var client = await sbGetOrCreateClient(clientName, key);
+  // If session has an id, update it; otherwise insert
+  if(sessionData.id) {
+    await sbPatch('sessions', {
+      meeting_date: sessionData.date,
+      meeting_type: sessionData.meetingType,
+      attendees: sessionData.attendees,
+      summary: sessionData.summary,
+      notes_and_questions: sessionData.notesAndQuestions || [],
+      client_next_steps: sessionData.clientNextSteps || [],
+      mts_tasks: sessionData.mtsTasks || [],
+      next_agenda: sessionData.nextAgenda || [],
+      follow_up_email: sessionData.followUpEmail,
+      flags: sessionData.flags || [],
+      ghost_items: sessionData.ghostItems || []
+    }, {id: sessionData.id}, key);
+    return sessionData.id;
+  } else {
+    var inserted = await sbPost('sessions', {
+      client_id: client.id,
+      client_name: clientName,
+      meeting_date: sessionData.date,
+      meeting_type: sessionData.meetingType,
+      attendees: sessionData.attendees,
+      hosted_by: 'Momen Tax Services',
+      summary: sessionData.summary,
+      notes_and_questions: sessionData.notesAndQuestions || [],
+      client_next_steps: sessionData.clientNextSteps || [],
+      mts_tasks: sessionData.mtsTasks || [],
+      next_agenda: sessionData.nextAgenda || [],
+      follow_up_email: sessionData.followUpEmail,
+      flags: sessionData.flags || [],
+      ghost_items: sessionData.ghostItems || []
+    }, key);
+    return inserted ? inserted.id : null;
   }
-}`;
+}
+async function sbUpdateClientProfile(clientName, profile, openItems, key) {
+  var clients = await sbGet('clients', {'name': 'eq.'+clientName, 'limit': '1'}, key);
+  if(!clients || !clients.length) return;
+  await sbPatch('clients', {profile: profile, open_items: openItems||[], updated_at: new Date().toISOString()}, {id: clients[0].id}, key);
+}
+async function sbDeleteClient(clientName, key) {
+  var clients = await sbGet('clients', {'name': 'eq.'+clientName, 'limit': '1'}, key);
+  if(!clients || !clients.length) return;
+  await sbDelete('clients', {id: clients[0].id}, key);
+}
+async function sbRenameClient(oldName, newName, key) {
+  var clients = await sbGet('clients', {'name': 'eq.'+oldName, 'limit': '1'}, key);
+  if(!clients || !clients.length) return;
+  await sbPatch('clients', {name: newName}, {id: clients[0].id}, key);
+  await sbPatch('sessions', {client_name: newName}, {client_name: oldName}, key);
+}
 
-// ── Storage ───────────────────────────────────────────────────────────────────
+// ── Storage (localStorage fallback kept for offline resilience) ───────────────
 const toKey = n => 'mts_client_' + n.toLowerCase().replace(/\s+/g,'_');
 const getApiKey = () => localStorage.getItem('mts_anthropic_key')||'';
+const getSbKey = () => localStorage.getItem('mts_sb_key')||'';
+const saveSbKey = k => localStorage.setItem('mts_sb_key', k);
 const saveApiKey = k => localStorage.setItem('mts_anthropic_key',k);
 const loadClient = n => { try { const r=localStorage.getItem(toKey(n)); return r?JSON.parse(r):null; } catch{return null;} };
 const saveClient = (n,d) => { try { if(JSON.stringify(d).length>4000000) d.sessions=d.sessions.slice(-10); localStorage.setItem(toKey(n),JSON.stringify(d)); } catch(e){console.error(e);} };
@@ -116,7 +198,9 @@ async function runAgent(transcript, history, apiKey) {
   });
   const data = await res.json();
   if(data.error) throw new Error(data.error.message);
-  return JSON.parse(data.content[0].text.replace(/```json|```/g,'').trim());
+  var fence=String.fromCharCode(96,96,96);
+  var raw=data.content[0].text.split(fence+'json').join('').split(fence).join('').trim();
+  return JSON.parse(raw);
 }
 
 async function runAgenda(clientName, history, apiKey) {
@@ -156,7 +240,8 @@ async function generateClientProfile(clientName, data, apiKey) {
   });
   var d = await res.json();
   if(d.error) throw new Error(d.error.message);
-  var text = d.content[0].text.replace(/```json|```/g,'').trim();
+  var fence=String.fromCharCode(96,96,96);
+  var text=d.content[0].text.split(fence+'json').join('').split(fence).join('').trim();
   return JSON.parse(text);
 }
 
@@ -432,6 +517,25 @@ function SessionCard({session:s,index,total,clientName,onSave}){
   );
 }
 
+// ── Supabase Key Modal ───────────────────────────────────────────────────────
+function SbKeyModal({onSave}){
+  var [val,setVal]=useState('');
+  return h('div',{className:'modal-bg'},
+    h('div',{className:'modal'},
+      h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,marginBottom:8,color:C.text}},'Connect to Database'),
+      h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.65,marginBottom:24}},'Enter your Supabase anon key to sync client data across devices. Found in Supabase → Settings → API.'),
+      h('div',{style:{marginBottom:8,color:C.muted,fontSize:11,fontWeight:600,letterSpacing:'0.08em'}},'SUPABASE ANON KEY'),
+      h('input',{value:val,onChange:function(e){setVal(e.target.value);},
+        onKeyDown:function(e){if(e.key==='Enter'&&val.length>10)onSave(val);},
+        placeholder:'sb_publishable_...',type:'password',autoFocus:true,
+        style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit',marginBottom:16}}),
+      h('button',{onClick:function(){onSave(val);},disabled:val.length<10,
+        style:{width:'100%',background:val.length>=10?C.accent:C.accentDim,color:C.bg,border:'none',borderRadius:6,padding:'10px',fontSize:13,fontWeight:700,cursor:val.length>=10?'pointer':'not-allowed',fontFamily:'inherit'}},
+        'Connect →')
+    )
+  );
+}
+
 // ── Password Gate ─────────────────────────────────────────────────────────────
 function PasswordGate({onUnlock}){
   const [val,setVal]=useState('');
@@ -477,12 +581,15 @@ function ApiKeyModal({onSave}){
 function App(){
   const [unlocked,setUnlocked]=useState(()=>localStorage.getItem('mts_unlocked')==='true');
   const [apiKey,setApiKey]=useState(()=>getApiKey());
+  const [sbKey,setSbKey]=useState(()=>getSbKey());
+  const [dbLoading,setDbLoading]=useState(false);
   const [view,setView]=useState(()=>sessionStorage.getItem('mts_view')||'input');
   const [transcript,setTranscript]=useState('');
   const [result,setResult]=useState(null);
   const [status,setStatus]=useState('idle');
   const [errorMsg,setErrorMsg]=useState('');
   const [clients,setClients]=useState(()=>listClients());
+  useEffect(function(){if(sbKey){sbListClients(sbKey).then(function(names){setClients(names);}).catch(function(e){console.error('initial load',e);});}}, [sbKey]);
   const [detailClient,setDetailClient]=useState(()=>sessionStorage.getItem('mts_detail_client')||null);
   const [detailData,setDetailData]=useState(()=>{
     var n=sessionStorage.getItem('mts_detail_client');
@@ -501,7 +608,12 @@ function App(){
   const [agendaLoading,setAgendaLoading]=useState(false);
   const resultRef=useRef(null);
 
-  const refreshClients=()=>setClients(listClients());
+  async function refreshClients(){
+    if(sbKey){
+      try { var names=await sbListClients(sbKey); setClients(names); return; } catch(e){console.error('sbList error',e);}
+    }
+    setClients(listClients());
+  }
   function persistView(v){sessionStorage.setItem('mts_view',v);setView(v);}
   function persistDetail(name,data){
     if(name){sessionStorage.setItem('mts_detail_client',name);}
@@ -534,11 +646,22 @@ function App(){
         mtsTasks:parsed.mtsTasks,nextAgenda:parsed.nextAgenda,
         followUpEmail:parsed.followUpEmail,flags:parsed.flags,ghostItems:parsed.ghostItems,
       });
-      existing.openItems=[...(parsed.ghostItems||[]),...(parsed.mtsTasks||[]).filter(t=>/pending|follow|outstanding|need|waiting/i.test(t))].slice(0,12);
-      // Set lastMeetingDate from the most recent session date
-      var allDates = existing.sessions.map(function(s){return s.date;}).filter(Boolean);
-      merged.lastMeetingDate = allDates.length ? allDates[allDates.length-1] : '';
+      existing.openItems=[...(parsed.ghostItems||[]),...(parsed.mtsTasks||[]).filter(function(t){return /pending|follow|outstanding|need|waiting/i.test(t);})].slice(0,12);
+      var allDates2 = existing.sessions.map(function(s){return s.date;}).filter(Boolean);
+      merged.lastMeetingDate = allDates2.length ? allDates2[allDates2.length-1] : '';
       existing.profile=merged;
+      var newSession = {
+        date: parsed.meetingDate||new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}),
+        meetingType: parsed.meetingType, attendees: parsed.attendees, summary: parsed.summary,
+        notesAndQuestions: parsed.notesAndQuestions, clientNextSteps: parsed.clientNextSteps,
+        mtsTasks: parsed.mtsTasks, nextAgenda: parsed.nextAgenda,
+        followUpEmail: parsed.followUpEmail, flags: parsed.flags, ghostItems: parsed.ghostItems
+      };
+      if(sbKey) {
+        sbSaveSession(cn, newSession, sbKey).then(function(newId){ if(newId) newSession.id=newId; }).catch(function(e){console.error('sbSaveSession',e);});
+        sbUpdateClientProfile(cn, merged, existing.openItems, sbKey).catch(function(e){console.error('sbUpdateProfile',e);});
+      }
+      existing.sessions.push(newSession);
       saveClient(cn,existing);refreshClients();
       setStatus('done');persistView('result');
       setTimeout(()=>resultRef.current?.scrollIntoView({behavior:'smooth'}),80);
@@ -553,55 +676,49 @@ function App(){
     setAgendaLoading(false);
   }
 
-  function handleViewClient(name){
-    const data=loadClient(name);
-    persistDetail(name,data);setProfileDraft(data?.profile||{});setEditingProfile(false);persistView('clients');
-    // Auto-generate profile if sessions exist and profile is sparse
+  async function handleViewClient(name){
+    setDbLoading(true);
+    var data = null;
+    if(sbKey){
+      try { data = await sbLoadClient(name, sbKey); } catch(e){ console.error('sbLoad',e); }
+    }
+    if(!data) data = loadClient(name);
+    setDbLoading(false);
+    persistDetail(name,data);
+    setProfileDraft(data && data.profile ? data.profile : {});
+    setEditingProfile(false);
+    persistView('clients');
     if(data && data.sessions && data.sessions.length > 0) {
       var profile = data.profile || {};
-      var hasInfo = profile.notes || profile.businesses && profile.businesses.length > 0 || profile.serviceType && profile.serviceType !== 'Unknown';
+      var hasInfo = profile.notes || (profile.businesses && profile.businesses.length > 0) || (profile.serviceType && profile.serviceType !== 'Unknown');
       if(!hasInfo) {
         setGeneratingProfile(true);
         generateClientProfile(name, data, apiKey).then(function(generated) {
           if(!generated) return;
           var merged = Object.assign({}, profile);
-          Object.entries(generated).forEach(function(entry) {
-            var k=entry[0], v=entry[1];
-            if(!merged[k] || merged[k]==='Unknown' || merged[k]==='' || (Array.isArray(merged[k]) && merged[k].length===0)) {
-              merged[k] = v;
-            }
+          Object.entries(generated).forEach(function(kv){
+            var k=kv[0], v=kv[1];
+            if(!merged[k]||merged[k]==='Unknown'||merged[k]===''||(Array.isArray(merged[k])&&merged[k].length===0)) merged[k]=v;
           });
-          // Always set lastMeetingDate from most recent session
-          var sessions = data.sessions || [];
-          if(sessions.length) merged.lastMeetingDate = sessions[sessions.length-1].date || '';
           var updated = Object.assign({}, data, {profile: merged});
+          if(sbKey) sbUpdateClientProfile(name, merged, updated.openItems||[], sbKey).catch(function(e){console.error(e);});
           saveClient(name, updated);
           persistDetail(name, updated);
           setProfileDraft(merged);
-        }).catch(function(e){console.error('Profile gen error',e);}).finally(function(){setGeneratingProfile(false);});
+        }).catch(function(e){console.error('Profile gen',e);}).finally(function(){setGeneratingProfile(false);});
       }
     }
   }
-
-  function handleSaveName(){
-    if(!nameDraft.trim()||nameDraft.trim()===detailClient){setEditingName(false);return;}
-    const newName=nameDraft.trim();
-    const data=loadClient(detailClient);
-    deleteClient(detailClient);
-    saveClient(newName,data);
-    persistDetail(newName, data);
-    setEditingName(false);
-    refreshClients();
-  }
-
-  function handleDeleteClient(name){
+  async function handleDeleteClient(name){
     if(!confirm('Delete all data for '+name+'?')) return;
+    if(sbKey){ try{ await sbDeleteClient(name, sbKey); }catch(e){console.error('sbDelete',e);} }
     deleteClient(name);refreshClients();persistDetail(null,null);
   }
 
   function handleSaveProfile(){
     if(!detailClient||!detailData) return;
     const updated={...detailData,profile:profileDraft};
+    if(sbKey){ sbUpdateClientProfile(detailClient, profileDraft, updated.openItems||[], sbKey).catch(function(e){console.error('sbProfileSave',e);}); }
     saveClient(detailClient,updated);persistDetail(detailClient,updated);setEditingProfile(false);
   }
 
@@ -609,6 +726,7 @@ function App(){
 
   if(!unlocked) return h(PasswordGate,{onUnlock:()=>setUnlocked(true)});
   if(!apiKey) return h(ApiKeyModal,{onSave:k=>{saveApiKey(k);setApiKey(k);}});
+  if(!sbKey) return h(SbKeyModal,{onSave:function(k){saveSbKey(k);setSbKey(k);refreshClients();}});
 
   return h('div',{style:{background:C.bg,minHeight:'100vh'}},
     // Header
@@ -663,7 +781,8 @@ function App(){
             ),
             h('div',{style:{display:'flex',gap:12,color:C.muted,fontSize:12,flexWrap:'wrap'}},
               h('span',null,result.meetingDate),
-              result.hostedBy&&h('span',null,'· Hosted by '+result.hostedBy)
+              result.hostedBy&&h('span',null,'· Hosted by '+result.hostedBy),
+              result.attendees&&h('span',null,'· Attended by '+result.attendees)
             )
           ),
           h('div',{style:{display:'flex',gap:8}},
@@ -845,6 +964,7 @@ function App(){
                 var sessions=detailData.sessions.slice();
                 sessions[realIndex]=updated;
                 var newData=Object.assign({},detailData,{sessions:sessions});
+                if(sbKey){ sbSaveSession(detailClient, updated, sbKey).catch(function(e){console.error('sbSessionEdit',e);}); }
                 saveClient(detailClient,newData);
                 setDetailData(newData);
               }

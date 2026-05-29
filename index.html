@@ -532,7 +532,7 @@ function App(){
   // Load home data
   useEffect(function(){
     if(view==='home'){loadHomeData();}
-  },[view]);
+  },[view,sbKey]);
 
   async function loadHomeData(){
     setHomeLoading(true);
@@ -550,12 +550,12 @@ function App(){
     if(view==='clients'&&!detailClient){
       sbGet('clients',{order:'name.asc',select:'name,profile'},sbKey).then(function(r){setClients((r||[]).map(function(c){return c.name;}));}).catch(function(e){console.error(e);});
     }
-  },[view,detailClient]);
+  },[view,detailClient,sbKey]);
 
   // Load client detail
   useEffect(function(){
     if(detailClient&&!detailData){loadDetail(detailClient);}
-  },[detailClient]);
+  },[detailClient,sbKey]);
 
   async function loadDetail(name){
     setDetailLoading(true);
@@ -740,7 +740,7 @@ function App(){
           return h('button',{key:t.id,onClick:function(){if(t.id==='clients'){setDetailClient('');setDetailClientSS('');setDetailData(null);}nav(t.id);},
             style:{background:active?C.accent:'transparent',color:active?C.bg:C.muted,border:'1px solid '+(active?C.accent:C.border),borderRadius:6,padding:'5px 13px',fontSize:12,cursor:'pointer',fontWeight:600,fontFamily:'inherit'}},t.label);
         }),
-        h('button',{onClick:function(){if(confirm('Change API key?')){localStorage.removeItem('mts_ak');setApiKey('');}},
+        h('button',{onClick:function(){if(confirm('Change settings? This will reset your API keys.')){localStorage.removeItem('mts_ak');localStorage.removeItem('mts_sb');setApiKey('');setSbKey('');}},
           style:{background:'transparent',border:'1px solid '+C.border,color:C.muted,borderRadius:6,padding:'5px 10px',fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Settings')
       )
     ),

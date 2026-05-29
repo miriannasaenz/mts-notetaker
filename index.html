@@ -3,14 +3,14 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>MTS Meeting Agent</title>
+<title>MTS Intelligence</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{background:#0F0F0F;color:#E8E4DC;font-family:'DM Sans','Helvetica Neue',sans-serif}
-textarea,input{resize:vertical}
-textarea:focus,input:focus,button:focus{outline:none}
+body{background:#0F0F0F;color:#E8E4DC;font-family:'DM Sans','Helvetica Neue',sans-serif;min-height:100vh}
+textarea,input,select{resize:vertical}
+textarea:focus,input:focus,select:focus,button:focus{outline:none}
 button{transition:opacity .15s;font-family:inherit}
 button:hover:not(:disabled){opacity:.8}
 ::-webkit-scrollbar{width:5px}
@@ -25,373 +25,180 @@ button:hover:not(:disabled){opacity:.8}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
 <script>
-const {useState,useRef,useEffect} = React;
+const {useState,useRef,useEffect,useCallback} = React;
 const h = React.createElement;
 
-// ── Constants ─────────────────────────────────────────────────────────────────
 const C = {
   bg:'#0F0F0F',surface:'#171717',card:'#1E1E1E',border:'#2A2A2A',
   accent:'#C8A96E',accentDim:'#8B6F3E',text:'#E8E4DC',muted:'#6B6560',
-  success:'#4CAF82',warn:'#E8834A',danger:'#E05252'
+  success:'#4CAF82',warn:'#E8834A',danger:'#E05252',blue:'#7B9FD4'
 };
 const SITE_PASSWORD = 'mts2025';
+
+// ── System prompt ─────────────────────────────────────────────────────────────
+const MTS_PROMPT = 'You are a meeting summary assistant for Momen Tax Services (MTS). Your job is to read a meeting transcript and/or agenda and produce a formatted meeting summary.\n\nROLE & CONTEXT\n- All meetings are hosted by Jasmine Hajimomen (founder)\n- Kevina Tweddle: client onboarding specialist; sends engagement letters and follow-up emails\n- Emely: client communications and implementation\n- Danny: accounting and payroll setup\n- Atenas: internal operations, payroll backdating\n- Tools: Canopy (CRM), QuickBooks, ADP, GoHighLevel, Notion\n- Clients may have multiple entities — treat each separately\n\nSUMMARY STRUCTURE:\n1. Notes/Questions — answers only, never restate the question\n2. Client Next Steps\n3. MTS Tasks — prefix with owner name (Danny:, Kevina:, etc.)\n4. Suggested Next Meeting Agenda — max 5, forward-looking\n5. Follow-Up Email\n\nEMAIL RULES\n- Open: "Hi [Name], Thank you for your time in meeting with Jasmine yesterday."\n- MTS action paragraph, client action list (bullets <5, numbered 5+)\n- Final: "As always, please don\'t hesitate to reach out — we are always an email or phone call away."\n- Sign: Warm regards / [Sender] / [Title] / Momen Tax Services\n- Default sender: Kevina Tweddle / Client Onboarding Specialist\n- No em dashes\n\nOUTPUT: Respond ONLY with valid JSON, no markdown fences:\n{"clientName":"string","meetingDate":"string","meetingType":"string","hostedBy":"Momen Tax Services","attendees":"string","summary":"string","notesAndQuestions":["string"],"clientNextSteps":["string"],"mtsTasks":["string"],"nextAgenda":["string"],"followUpEmail":{"subject":"string","body":"string"},"flags":["string"],"ghostItems":["string"],"clientProfile":{"phone":"string or Unknown","email":"string or Unknown","businesses":["string"],"industry":"string or Unknown","filingStatus":"string or Unknown","spouse":"string or Unknown","serviceType":"string or Unknown","lastMeetingDate":"string or Unknown","notes":"2-3 sentence plain text overview, no labels"}}';
+
+// ── Supabase ──────────────────────────────────────────────────────────────────
 const SB_URL = 'https://ykowuicymemzrhhfaiqz.supabase.co';
-const SB_KEY = localStorage.getItem('mts_sb_key') || '';
-const MTS_PROMPT = 'You are a meeting summary assistant for Momen Tax Services (MTS). Your job is to read a meeting transcript and/or agenda and produce a formatted meeting summary.\n\nROLE & CONTEXT\n- All meetings are hosted by Jasmine Hajimomen (founder)\n- Kevina Tweddle: client onboarding specialist; sends engagement letters, portal links, and follow-up emails — sign emails as "Kevina Tweddle / Client Onboarding Specialist / Momen Tax Services" when she is the sender\n- Emely: client communications and implementation\n- Danny: accounting, bookkeeping, payroll setup, QuickBooks, recurring transfers\n- Atenas: internal operations, payroll backdating questions\n- Tools used: Canopy (CRM and client portal), QuickBooks, ADP (payroll), GoHighLevel, Notion\n- Clients may have multiple entities (S-Corps, Partnerships, LLCs, sole props) — treat each entity separately in notes\n\nSUMMARY STRUCTURE — produce sections in this exact order:\n1. Notes/Questions — Direct answers and findings only. Never restate the question. Lead with the answer. Use full explanatory bullets (not just one-liners) when accounting or tax context requires it. If a question was not addressed, write "Not discussed — to be addressed at next meeting." If there is no agenda, summarize key discussion points by entity or topic.\n2. Client Next Steps — Action items for the client only. Concise bullets. Use numbered list if 5 or more items.\n3. MTS Tasks — Internal action items with owner name prefix (e.g. "Danny: Set up recurring transfer..."). Include specific dollar amounts, frequencies, account names, dates, and entity names wherever mentioned. Be as specific as the transcript allows.\n4. Suggested Next Meeting Agenda — Max 5 bullets. Forward-looking only, not a recap. Continue entity-by-entity reviews if the accounting walkthrough was not completed.\n5. Follow-Up Email — Written and ready to send. Always note the correct sender.\n\nWHAT NOT TO INCLUDE\n- No preliminary tax results tables or number sections unless directly discussed\n- No "Key Points" or "General Notes" sections\n- Do not repeat anything already in the agenda\n- Do not over-explain — keep bullets action-oriented\n\nEMAIL RULES\n- Open: "Hi [Name], Thank you for your time in meeting with Jasmine yesterday." (use "today" if same-day)\n- Short 1-2 sentence purpose paragraph\n- MTS action paragraph explaining what MTS is doing (be specific — name entities, amounts, and dates)\n- Client action list (bullets for <5 items, numbered for 5+ items)\n- If an IRS or government notice is involved: remind client NOT to pay until MTS reviews, and reference uploading to Canopy portal\n- Final line: "As always, please don\'t hesitate to reach out — we are always an email or phone call away."\n- Sign off: Warm regards / [Sender Full Name] / [Title] / Momen Tax Services\n- Default sender is Kevina Tweddle / Client Onboarding Specialist unless otherwise specified\n- No em dashes — use commas instead\n\nEMAIL TONE BY CLIENT TYPE\n- Lauryn-style: Include a Jasmine update paragraph if there is a specific blocker (e.g. payroll cannot start until prior taxes are paid)\n- Sarah-style: Reference sharing the P&L / QuickBooks access; keep it short\n- Brandon-style: Use numbered list; include franchise tax payment permission confirmation\n- Hank-style: Reference specific account used for payment; note W4s uploaded; e-signature request and engagement letter + invoice link as separate items\n- Multi-entity clients (like Dr. Rue): Be specific about which entity each transfer, payroll, or action applies to\n\nFLAGS & WATCH ITEMS — flag any of the following:\n- IRS or FTB notices (advise client not to pay until reviewed)\n- Incomplete accounting walkthroughs (note which entities were not reviewed)\n- Elevated tax liability from high profitability\n- Reclassifications still in progress\n- Missing documents or source data\n- Anything requiring Jasmine\'s specific attention or decision\n\nQUALITY CHECK (apply before producing output)\n- Did I answer every agenda question directly?\n- Did I include entity names and dollar amounts in MTS tasks?\n- Is the email warm, specific, and non-templated?\n- Are MTS tasks assigned to a specific person (Danny, Kevina, Atenas, etc.)?\n- Is the suggested agenda forward-looking and continuing unfinished work?\n\nOUTPUT: Respond ONLY with valid JSON, no markdown fences:\n{\n  "clientName": "string",\n  "meetingDate": "string",\n  "meetingType": "string (e.g. Accounting Review, Tax Planning, Onboarding, Payroll Review)",\n  "hostedBy": "Momen Tax Services",\n  "attendees": "string (e.g. Jasmine, Danny, Atenas)",\n  "summary": "2-3 sentence plain English overview — include entity names and key figures",\n  "notesAndQuestions": ["string — answer only, no restating the question, full context where needed"],\n  "clientNextSteps": ["string"],\n  "mtsTasks": ["string — always start with owner name e.g. Danny: or Kevina:"],\n  "nextAgenda": ["string — max 5, forward-looking, continue unfinished entity reviews"],\n  "followUpEmail": { "subject": "string", "body": "string" },\n  "flags": ["string — IRS notices, incomplete reviews, elevated liability, missing docs"],\n  "ghostItems": ["string — unresolved items from prior sessions if any"],\n  "clientProfile": {\n    "phone": "string or Unknown",\n    "email": "string or Unknown",\n    "businesses": ["list of all entity names mentioned"],\n    "industry": "string or Unknown",\n    "filingStatus": "string or Unknown",\n    "spouse": "string or Unknown",\n    "serviceType": "string or Unknown (e.g. TAS, CAS, Tax Prep, Bookkeeping, Accounting Review)",\n    "lastMeetingDate": "string or Unknown",\n    "notes": "2-3 sentence plain text overview starting with the client name, no labels or bold"\n  }\n}`';
-
-// ── Supabase helpers ─────────────────────────────────────────────────────────
-function sbHeaders(key) {
-  return {
-    'apikey': key || SB_KEY,
-    'Authorization': 'Bearer ' + (key || SB_KEY),
-    'Content-Type': 'application/json',
-    'Prefer': 'return=representation'
-  };
-}
-async function sbGet(table, params, key) {
-  var url = SB_URL + '/rest/v1/' + table + '?';
-  var qp = Object.entries(params||{}).map(function(e){return e[0]+'='+encodeURIComponent(e[1]);}).join('&');
-  var r = await fetch(url + qp, {headers: sbHeaders(key)});
-  if(!r.ok) throw new Error('Supabase GET error: ' + r.status);
+function sbH(k){return{'apikey':k,'Authorization':'Bearer '+k,'Content-Type':'application/json','Prefer':'return=representation'};}
+async function sbGet(table,params,k){
+  var url=SB_URL+'/rest/v1/'+table+'?';
+  var qp=Object.entries(params||{}).map(function(e){return e[0]+'='+encodeURIComponent(e[1]);}).join('&');
+  var r=await fetch(url+qp,{headers:sbH(k)});
+  if(!r.ok) throw new Error('DB error '+r.status);
   return r.json();
 }
-async function sbPost(table, data, key) {
-  var r = await fetch(SB_URL + '/rest/v1/' + table, {
-    method: 'POST', headers: sbHeaders(key), body: JSON.stringify(data)
-  });
-  if(!r.ok) throw new Error('Supabase POST error: ' + r.status);
-  var res = await r.json();
-  return Array.isArray(res) ? res[0] : res;
+async function sbPost(table,data,k){
+  var r=await fetch(SB_URL+'/rest/v1/'+table,{method:'POST',headers:sbH(k),body:JSON.stringify(data)});
+  if(!r.ok) throw new Error('DB error '+r.status);
+  var res=await r.json();
+  return Array.isArray(res)?res[0]:res;
 }
-async function sbPatch(table, data, match, key) {
-  var url = SB_URL + '/rest/v1/' + table + '?';
-  var qp = Object.entries(match).map(function(e){return e[0]+'=eq.'+encodeURIComponent(e[1]);}).join('&');
-  var r = await fetch(url + qp, {
-    method: 'PATCH', headers: sbHeaders(key), body: JSON.stringify(data)
-  });
-  if(!r.ok) throw new Error('Supabase PATCH error: ' + r.status);
+async function sbPatch(table,data,match,k){
+  var url=SB_URL+'/rest/v1/'+table+'?';
+  var qp=Object.entries(match).map(function(e){return e[0]+'=eq.'+encodeURIComponent(e[1]);}).join('&');
+  var r=await fetch(url+qp,{method:'PATCH',headers:sbH(k),body:JSON.stringify(data)});
+  if(!r.ok) throw new Error('DB error '+r.status);
   return r.json();
 }
-async function sbDelete(table, match, key) {
-  var url = SB_URL + '/rest/v1/' + table + '?';
-  var qp = Object.entries(match).map(function(e){return e[0]+'=eq.'+encodeURIComponent(e[1]);}).join('&');
-  var r = await fetch(url + qp, {method: 'DELETE', headers: sbHeaders(key)});
-  if(!r.ok) throw new Error('Supabase DELETE error: ' + r.status);
+async function sbDelete(table,match,k){
+  var url=SB_URL+'/rest/v1/'+table+'?';
+  var qp=Object.entries(match).map(function(e){return e[0]+'=eq.'+encodeURIComponent(e[1]);}).join('&');
+  var r=await fetch(url+qp,{method:'DELETE',headers:sbH(k)});
+  if(!r.ok) throw new Error('DB error '+r.status);
 }
 
-// ── Supabase client/session operations ────────────────────────────────────────
-async function sbGetOrCreateClient(name, key) {
-  var results = await sbGet('clients', {'name': 'eq.'+name, 'limit': '1'}, key);
-  if(results && results.length) return results[0];
-  return sbPost('clients', {name: name, profile: {}, open_items: []}, key);
-}
-async function sbLoadClient(name, key) {
-  var clients = await sbGet('clients', {'name': 'eq.'+name, 'limit': '1'}, key);
-  if(!clients || !clients.length) return null;
-  var client = clients[0];
-  var sessions = await sbGet('sessions', {'client_id': 'eq.'+client.id, 'order': 'created_at.asc'}, key);
-  var ghosts = await sbGet('ghost_items', {'client_id': 'eq.'+client.id, 'resolved': 'eq.false'}, key);
-  // Map DB sessions to app format
-  var mappedSessions = (sessions||[]).map(function(s){
-    return {
-      id: s.id,
-      date: s.meeting_date,
-      meetingType: s.meeting_type,
-      attendees: s.attendees,
-      summary: s.summary,
-      notesAndQuestions: s.notes_and_questions,
-      clientNextSteps: s.client_next_steps,
-      mtsTasks: s.mts_tasks,
-      nextAgenda: s.next_agenda,
-      followUpEmail: s.follow_up_email,
-      flags: s.flags,
-      ghostItems: s.ghost_items
-    };
-  });
-  return {
-    id: client.id,
-    profile: client.profile || {},
-    openItems: (ghosts||[]).map(function(g){return g.summary;}),
-    sessions: mappedSessions
-  };
-}
-async function sbListClients(key) {
-  var results = await sbGet('clients', {'order': 'name.asc', 'select': 'name'}, key);
-  return (results||[]).map(function(c){return c.name;});
-}
-async function sbSaveSession(clientName, sessionData, key) {
-  var client = await sbGetOrCreateClient(clientName, key);
-  // If session has an id, update it; otherwise insert
-  if(sessionData.id) {
-    await sbPatch('sessions', {
-      meeting_date: sessionData.date,
-      meeting_type: sessionData.meetingType,
-      attendees: sessionData.attendees,
-      summary: sessionData.summary,
-      notes_and_questions: sessionData.notesAndQuestions || [],
-      client_next_steps: sessionData.clientNextSteps || [],
-      mts_tasks: sessionData.mtsTasks || [],
-      next_agenda: sessionData.nextAgenda || [],
-      follow_up_email: sessionData.followUpEmail,
-      flags: sessionData.flags || [],
-      ghost_items: sessionData.ghostItems || []
-    }, {id: sessionData.id}, key);
-    return sessionData.id;
-  } else {
-    var inserted = await sbPost('sessions', {
-      client_id: client.id,
-      client_name: clientName,
-      meeting_date: sessionData.date,
-      meeting_type: sessionData.meetingType,
-      attendees: sessionData.attendees,
-      hosted_by: 'Momen Tax Services',
-      summary: sessionData.summary,
-      notes_and_questions: sessionData.notesAndQuestions || [],
-      client_next_steps: sessionData.clientNextSteps || [],
-      mts_tasks: sessionData.mtsTasks || [],
-      next_agenda: sessionData.nextAgenda || [],
-      follow_up_email: sessionData.followUpEmail,
-      flags: sessionData.flags || [],
-      ghost_items: sessionData.ghostItems || []
-    }, key);
-    return inserted ? inserted.id : null;
-  }
-}
-async function sbUpdateClientProfile(clientName, profile, openItems, key) {
-  var clients = await sbGet('clients', {'name': 'eq.'+clientName, 'limit': '1'}, key);
-  if(!clients || !clients.length) return;
-  await sbPatch('clients', {profile: profile, open_items: openItems||[], updated_at: new Date().toISOString()}, {id: clients[0].id}, key);
-}
-async function sbDeleteClient(clientName, key) {
-  var clients = await sbGet('clients', {'name': 'eq.'+clientName, 'limit': '1'}, key);
-  if(!clients || !clients.length) return;
-  await sbDelete('clients', {id: clients[0].id}, key);
-}
-async function sbRenameClient(oldName, newName, key) {
-  var clients = await sbGet('clients', {'name': 'eq.'+oldName, 'limit': '1'}, key);
-  if(!clients || !clients.length) return;
-  await sbPatch('clients', {name: newName}, {id: clients[0].id}, key);
-  await sbPatch('sessions', {client_name: newName}, {client_name: oldName}, key);
-}
+// ── Storage ───────────────────────────────────────────────────────────────────
+const getApiKey = ()=>localStorage.getItem('mts_ak')||'';
+const saveApiKey = k=>localStorage.setItem('mts_ak',k);
+const getSbKey = ()=>localStorage.getItem('mts_sb')||'';
+const saveSbKey = k=>localStorage.setItem('mts_sb',k);
+const getView = ()=>sessionStorage.getItem('mts_view')||'home';
+const setViewSS = v=>sessionStorage.setItem('mts_view',v);
+const getDetailClient = ()=>sessionStorage.getItem('mts_dc')||'';
+const setDetailClientSS = n=>{if(n)sessionStorage.setItem('mts_dc',n);else sessionStorage.removeItem('mts_dc');};
 
-// ── Storage (localStorage fallback kept for offline resilience) ───────────────
-const toKey = n => 'mts_client_' + n.toLowerCase().replace(/\s+/g,'_');
-const getApiKey = () => localStorage.getItem('mts_anthropic_key')||'';
-const getSbKey = () => localStorage.getItem('mts_sb_key')||'';
-const saveSbKey = k => localStorage.setItem('mts_sb_key', k);
-const saveApiKey = k => localStorage.setItem('mts_anthropic_key',k);
-const loadClient = n => { try { const r=localStorage.getItem(toKey(n)); return r?JSON.parse(r):null; } catch{return null;} };
-const saveClient = (n,d) => { try { if(JSON.stringify(d).length>4000000) d.sessions=d.sessions.slice(-10); localStorage.setItem(toKey(n),JSON.stringify(d)); } catch(e){console.error(e);} };
-const listClients = () => { try { return Object.keys(localStorage).filter(k=>k.startsWith('mts_client_')).map(k=>k.replace('mts_client_','').replace(/_/g,' ')); } catch{return[];} };
-const deleteClient = n => { try{localStorage.removeItem(toKey(n));}catch(e){console.error(e);} };
-
-// ── API ───────────────────────────────────────────────────────────────────────
-async function runAgent(transcript, history, apiKey) {
-  const histCtx = history?.sessions?.length
-    ? '\n\nCLIENT HISTORY (last 3 sessions):\n'+JSON.stringify(history.sessions.slice(-3),null,2)+'\nExisting profile: '+JSON.stringify(history.profile||{})+'\nCarried open items: '+JSON.stringify(history.openItems||[])
-    : '';
-  const res = await fetch('https://api.anthropic.com/v1/messages',{
+// ── Claude API ────────────────────────────────────────────────────────────────
+async function runAgent(transcript,history,apiKey){
+  var histCtx=history&&history.sessions&&history.sessions.length
+    ?'\n\nCLIENT HISTORY:\n'+JSON.stringify(history.sessions.slice(-3),null,2)+'\nProfile: '+JSON.stringify(history.profile||{})
+    :'';
+  var r=await fetch('https://api.anthropic.com/v1/messages',{
     method:'POST',
     headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
     body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:4000,system:MTS_PROMPT,
-      messages:[{role:'user',content:'Process this transcript and return ONLY the JSON.'+histCtx+'\n\nTRANSCRIPT:\n'+transcript.slice(0,12000)}]})
+      messages:[{role:'user',content:'Process this and return ONLY the JSON.'+histCtx+'\n\nTRANSCRIPT:\n'+transcript.slice(0,12000)}]})
   });
-  const data = await res.json();
+  var data=await r.json();
   if(data.error) throw new Error(data.error.message);
   var fence=String.fromCharCode(96,96,96);
   var raw=data.content[0].text.split(fence+'json').join('').split(fence).join('').trim();
   return JSON.parse(raw);
 }
 
-async function runAgenda(clientName, history, apiKey) {
-  const histCtx = history?.sessions?.length
-    ? 'Last '+history.sessions.length+' session(s).\nMost recent: '+history.sessions.slice(-1)[0]?.summary+'\nOpen items: '+JSON.stringify(history.openItems||[])+'\nLast suggested agenda: '+JSON.stringify(history.sessions.slice(-1)[0]?.nextAgenda||[])
-    : 'No prior sessions on record.';
-  const res = await fetch('https://api.anthropic.com/v1/messages',{
+async function runAgenda(clientName,history,apiKey){
+  var lastSession=history&&history.sessions&&history.sessions.length?history.sessions.slice(-1)[0]:null;
+  var openItems=history&&history.openItems?history.openItems:[];
+  var ctx='Client: '+clientName+'\nService: '+(history&&history.profile&&history.profile.serviceType||'Unknown')+
+    '\nOpen items: '+openItems.join('; ')+
+    '\nLast meeting: '+(lastSession?lastSession.date+' — '+lastSession.summary:'No prior sessions');
+  var r=await fetch('https://api.anthropic.com/v1/messages',{
     method:'POST',
     headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
     body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:800,system:MTS_PROMPT,
-      messages:[{role:'user',content:'Build a pre-meeting agenda for client: '+clientName+'\n\nCLIENT HISTORY:\n'+histCtx+'\n\nReturn a clean numbered agenda (max 6 items) as plain text only.'}]})
+      messages:[{role:'user',content:'Build a pre-meeting agenda for: '+clientName+'\n\nCONTEXT:\n'+ctx+'\n\nReturn a clean numbered agenda (max 7 items), plain text only. Lead with open items.'}]})
   });
-  const data = await res.json();
+  var data=await r.json();
   if(data.error) throw new Error(data.error.message);
   return data.content[0].text;
 }
 
-// ── Generate client summary ──────────────────────────────────────────────────
-// ── Generate client profile from session history ─────────────────────────────
-async function generateClientProfile(clientName, data, apiKey) {
-  var sessions = data.sessions || [];
-  if (!sessions.length) return null;
-  var ctx = sessions.map(function(s,i){
-    return 'Session '+(i+1)+' ('+s.date+', '+s.meetingType+'): '+(s.summary||'')+
-      '\nMTS Tasks: '+((s.mtsTasks||[]).join('; '))+
-      '\nClient Steps: '+((s.clientNextSteps||[]).join('; '));
-  }).join('\n\n');
-
-  var lastDate = sessions.length ? sessions[sessions.length-1].date || '' : '';
-  var prompt = 'You are a tax advisory assistant for Momen Tax Services. Based on the session history below for client "'+clientName+'", extract the following and respond ONLY with valid JSON, no markdown fences:\n{\n  "notes": "2-3 sentence plain text overview starting with the client name, no labels or bold",\n  "phone": "phone number or Unknown",\n  "email": "email or Unknown",\n  "businesses": ["list of business names"],\n  "industry": "industry or Unknown",\n  "filingStatus": "tax filing status e.g. Single, MFJ, S-Corp, Partnership or Unknown",\n  "spouse": "spouse name or Unknown",\n  "serviceType": "e.g. TAS, CAS, Tax Prep, Bookkeeping or Unknown"\n}\n\nSESSION HISTORY:\n'+ctx;
-
-  var res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body: JSON.stringify({model:'claude-sonnet-4-6', max_tokens:600,
-      messages:[{role:'user', content:prompt}]})
-  });
-  var d = await res.json();
-  if(d.error) throw new Error(d.error.message);
+async function runProfileGen(clientName,data,apiKey){
+  var sessions=data.sessions||[];
+  if(!sessions.length) return null;
+  var ctx=sessions.map(function(s,i){return 'Session '+(i+1)+' ('+s.date+'): '+(s.summary||'');}).join('\n');
   var fence=String.fromCharCode(96,96,96);
-  var text=d.content[0].text.split(fence+'json').join('').split(fence).join('').trim();
-  return JSON.parse(text);
+  var prompt='You are a tax advisory assistant for Momen Tax Services. Based on the session history for client "'+clientName+'", extract the following and respond ONLY with valid JSON, no markdown fences:\n{"notes":"2-3 sentence plain text overview starting with the client name","phone":"string or Unknown","email":"string or Unknown","businesses":["list of business names"],"industry":"string or Unknown","filingStatus":"string or Unknown","spouse":"string or Unknown","serviceType":"string or Unknown"}\n\nSESSIONS:\n'+ctx;
+  var r=await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:600,messages:[{role:'user',content:prompt}]})
+  });
+  var d=await r.json();
+  if(d.error) throw new Error(d.error.message);
+  var raw=d.content[0].text.split(fence+'json').join('').split(fence).join('').trim();
+  return JSON.parse(raw);
 }
 
 // ── Format for copy ───────────────────────────────────────────────────────────
-function formatForCopy(r, clientName) {
-  const lines = [];
-  lines.push('MEETING SUMMARY — '+(r.meetingType||'Advisory Meeting'));
-  lines.push('Client: '+(clientName||r.clientName||''));
-  lines.push('Date: '+(r.meetingDate||''));
-  lines.push('Hosted By: '+(r.hostedBy||'Momen Tax Services'));
-  lines.push('');
-  if(r.notesAndQuestions?.length){lines.push('NOTES / QUESTIONS');r.notesAndQuestions.forEach(i=>lines.push('• '+i));lines.push('');}
-  if(r.clientNextSteps?.length){lines.push('CLIENT NEXT STEPS');r.clientNextSteps.forEach(i=>lines.push('• '+i));lines.push('');}
-  if(r.mtsTasks?.length){lines.push('MTS TASKS');r.mtsTasks.forEach(i=>lines.push('• '+i));lines.push('');}
-  if(r.nextAgenda?.length){lines.push('SUGGESTED NEXT MEETING AGENDA');r.nextAgenda.forEach(i=>lines.push('• '+i));lines.push('');}
-  if(r.flags?.length){lines.push('FLAGS & WATCH ITEMS');r.flags.forEach(i=>lines.push('• '+i));lines.push('');}
+function formatForCopy(r,clientName){
+  var lines=['MEETING SUMMARY — '+(r.meetingType||'Advisory Meeting'),'Client: '+(clientName||r.clientName||''),'Date: '+(r.meetingDate||''),'Hosted By: '+(r.hostedBy||'Momen Tax Services'),''];
+  if(r.notesAndQuestions&&r.notesAndQuestions.length){lines.push('NOTES / QUESTIONS');r.notesAndQuestions.forEach(function(i){lines.push('• '+i);});lines.push('');}
+  if(r.clientNextSteps&&r.clientNextSteps.length){lines.push('CLIENT NEXT STEPS');r.clientNextSteps.forEach(function(i){lines.push('• '+i);});lines.push('');}
+  if(r.mtsTasks&&r.mtsTasks.length){lines.push('MTS TASKS');r.mtsTasks.forEach(function(i){lines.push('• '+i);});lines.push('');}
+  if(r.nextAgenda&&r.nextAgenda.length){lines.push('SUGGESTED NEXT AGENDA');r.nextAgenda.forEach(function(i){lines.push('• '+i);});lines.push('');}
+  if(r.flags&&r.flags.length){lines.push('FLAGS & WATCH ITEMS');r.flags.forEach(function(i){lines.push('• '+i);});lines.push('');}
   if(r.followUpEmail){lines.push('FOLLOW-UP EMAIL');lines.push('Subject: '+r.followUpEmail.subject);lines.push('');lines.push(r.followUpEmail.body||'');}
   return lines.join('\n');
 }
 
-// ── UI Components ─────────────────────────────────────────────────────────────
-function Tag({color,children}){
-  return h('span',{style:{background:color+'22',color,border:'1px solid '+color+'44',borderRadius:4,padding:'2px 8px',fontSize:11,fontWeight:600,letterSpacing:'0.05em',textTransform:'uppercase'}},children);
-}
+// ── UI Atoms ──────────────────────────────────────────────────────────────────
+function Tag({color,children}){return h('span',{style:{background:color+'22',color,border:'1px solid '+color+'44',borderRadius:4,padding:'2px 8px',fontSize:11,fontWeight:600,letterSpacing:'0.05em',textTransform:'uppercase'}},children);}
 
-function Btn({onClick,disabled,variant='primary',small,children,style:s={}}){
-  const base={border:'none',borderRadius:6,cursor:disabled?'not-allowed':'pointer',fontWeight:600,fontFamily:'inherit',...s};
-  const v={
+function Btn({onClick,disabled,variant,small,children,style:s={}}){
+  variant=variant||'primary';
+  var base={border:'none',borderRadius:6,cursor:disabled?'not-allowed':'pointer',fontWeight:600,fontFamily:'inherit',...s};
+  var v={
     primary:{background:disabled?C.accentDim:C.accent,color:C.bg,padding:small?'5px 14px':'10px 28px',fontSize:small?12:13},
     ghost:{background:'transparent',color:C.muted,border:'1px solid '+C.border,padding:small?'4px 12px':'6px 16px',fontSize:small?11:12},
     danger:{background:C.danger+'18',color:C.danger,border:'1px solid '+C.danger+'44',padding:'4px 12px',fontSize:11},
+    nav:{background:C.card,color:C.text,border:'1px solid '+C.border,borderRadius:10,padding:'16px 20px',fontSize:13,fontWeight:600,textAlign:'left',width:'100%'},
   };
   return h('button',{onClick,disabled,style:{...base,...v[variant]}},children);
 }
 
-function CopyBtn({getText,label='Copy All'}){
-  const [copied,setCopied]=useState(false);
-  return h('button',{
-    onClick:()=>{navigator.clipboard.writeText(getText());setCopied(true);setTimeout(()=>setCopied(false),2000);},
-    style:{background:copied?C.success+'22':C.accentDim,color:copied?C.success:'#fff',border:copied?'1px solid '+C.success+'44':'none',borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}
-  },copied?'Copied!':label);
+function CopyBtn({getText,label}){
+  var [copied,setCopied]=useState(false);
+  return h('button',{onClick:function(){navigator.clipboard.writeText(getText());setCopied(true);setTimeout(function(){setCopied(false);},2000);},
+    style:{background:copied?C.success+'22':C.accentDim,color:copied?C.success:'#fff',border:copied?'1px solid '+C.success+'44':'none',borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}},
+    copied?'Copied!':(label||'Copy'));
 }
 
-function Section({icon,title,items,accent,checkable,checked=[],onCheck}){
-  if(!items?.length) return null;
+function Section({icon,title,items,accent,checkable,checked,onCheck}){
+  checked=checked||[];
+  if(!items||!items.length) return null;
   return h('div',{style:{marginBottom:22}},
     h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:10}},
-      h('span',null,icon),
+      icon&&h('span',null,icon),
       h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:12,color:accent||C.accent,fontWeight:600,letterSpacing:'0.1em',textTransform:'uppercase'}},title)
     ),
     h('div',{style:{display:'flex',flexDirection:'column',gap:5}},
-      items.map((item,i)=>h('div',{key:i,onClick:checkable?()=>onCheck(i):undefined,
-        style:{display:'flex',gap:10,padding:'8px 12px',background:C.surface,borderRadius:6,
-          borderLeft:'2px solid '+(accent||C.accent)+'44',cursor:checkable?'pointer':'default',
-          opacity:checked.includes(i)?0.38:1,textDecoration:checked.includes(i)?'line-through':'none'}},
-        h('span',{style:{color:accent||C.accentDim,fontSize:11,marginTop:2,flexShrink:0}},String(i+1).padStart(2,'0')),
-        h('span',{style:{color:C.text,fontSize:13,lineHeight:1.6}},item)
-      ))
+      items.map(function(item,i){
+        return h('div',{key:i,onClick:checkable?function(){onCheck(i);}:undefined,
+          style:{display:'flex',gap:10,padding:'8px 12px',background:C.surface,borderRadius:6,borderLeft:'2px solid '+(accent||C.accent)+'44',cursor:checkable?'pointer':'default',opacity:checked.indexOf(i)>=0?0.38:1,textDecoration:checked.indexOf(i)>=0?'line-through':'none'}},
+          h('span',{style:{color:accent||C.accentDim,fontSize:11,marginTop:2,flexShrink:0}},String(i+1).padStart(2,'0')),
+          h('span',{style:{color:C.text,fontSize:13,lineHeight:1.6}},item)
+        );
+      })
     ),
     checkable&&h('div',{style:{color:C.muted,fontSize:11,marginTop:5}},'Click to mark complete')
   );
 }
 
 function EmailBlock({email}){
-  const [copied,setCopied]=useState(false);
+  var [copied,setCopied]=useState(false);
   if(!email) return null;
-  const full='Subject: '+email.subject+'\n\n'+email.body;
+  var full='Subject: '+email.subject+'\n\n'+email.body;
   return h('div',{style:{marginBottom:22}},
     h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}},
-      h('div',{style:{display:'flex',alignItems:'center',gap:8}},
-        
-        h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:12,color:C.accent,fontWeight:600,letterSpacing:'0.1em',textTransform:'uppercase'}},'Follow-Up Email')
-      ),
-      h('button',{onClick:()=>{navigator.clipboard.writeText(full);setCopied(true);setTimeout(()=>setCopied(false),2000);},
+      h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:12,color:C.accent,fontWeight:600,letterSpacing:'0.1em',textTransform:'uppercase'}},'Follow-Up Email'),
+      h('button',{onClick:function(){navigator.clipboard.writeText(full);setCopied(true);setTimeout(function(){setCopied(false);},2000);},
         style:{background:copied?C.success+'18':C.accentDim,color:copied?C.success:'#fff',border:copied?'1px solid '+C.success+'44':'none',borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}},
         copied?'Copied':'Copy Email')
     ),
     h('div',{style:{background:C.surface,borderRadius:8,padding:18,border:'1px solid '+C.border}},
-      h('div',{style:{color:C.accent,fontSize:11,fontWeight:700,marginBottom:10,letterSpacing:'0.05em'}},'SUBJECT: '+email.subject),
+      h('div',{style:{color:C.accent,fontSize:11,fontWeight:700,marginBottom:10}},'SUBJECT: '+email.subject),
       h('pre',{style:{color:C.text,fontSize:13,lineHeight:1.75,whiteSpace:'pre-wrap',fontFamily:'inherit'}},email.body)
-    )
-  );
-}
-
-// ── Profile Card ──────────────────────────────────────────────────────────────
-const PROFILE_FIELDS=[
-  {key:'phone',label:'Phone',icon:''},
-  {key:'email',label:'Email',icon:''},
-  {key:'industry',label:'Industry',icon:''},
-  {key:'filingStatus',label:'Tax Filing Status',icon:''},
-  {key:'spouse',label:'Spouse',icon:''},
-  {key:'serviceType',label:'Service Type',icon:''},
-  {key:'lastMeetingDate',label:'Last Meeting Date',icon:''},
-];
-
-function BusinessesInput({value, onChange}) {
-  const [text, setText] = useState((value||[]).join(', '));
-  // Sync if parent value changes (e.g. on load)
-  React.useEffect(() => { setText((value||[]).join(', ')); }, [JSON.stringify(value)]);
-  return h('div', null,
-    h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},'BUSINESSES / ENTITIES'),
-    h('input',{
-      value: text,
-      onChange: e => setText(e.target.value),
-      onBlur: e => onChange(e.target.value.split(',').map(s=>s.trim()).filter(Boolean)),
-      placeholder:'e.g. Athena Holdings, MCI Private Equity (comma separated)',
-      style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit'}
-    }),
-    h('div',{style:{color:C.muted,fontSize:10,marginTop:4}},'Separate multiple businesses with commas')
-  );
-}
-
-function ProfileCard({profile={},editing,onChange}){
-  const val=k=>profile[k]||'Unknown';
-  if(editing){
-    return h('div',{style:{display:'flex',flexDirection:'column',gap:10}},
-      PROFILE_FIELDS.map(f=>h('div',{key:f.key},
-        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},f.label.toUpperCase()),
-        h('input',{value:profile[f.key]||'',onChange:e=>onChange(f.key,e.target.value),
-          placeholder:'Enter '+f.label.toLowerCase()+'...',
-          style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit'}})
-      )),
-      h('div',null,
-        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},'BUSINESSES / ENTITIES'),
-        h(BusinessesInput,{value:(profile.businesses||[]),onChange:v=>onChange('businesses',v)})
-      ),
-      h('div',null,
-        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},'CLIENT NOTES'),
-        h('textarea',{value:profile.notes||'',onChange:e=>onChange('notes',e.target.value),
-          placeholder:'Brief overview of this client...',rows:3,
-          style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit'}})
-      )
-    );
-  }
-  return h('div',null,
-    profile.notes&&h('div',{style:{background:C.surface,borderRadius:8,padding:'12px 14px',marginBottom:14,borderLeft:'3px solid '+C.accent}},
-      h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:6}},'CLIENT OVERVIEW'),
-      h('p',{style:{color:C.text,fontSize:13,lineHeight:1.65,margin:0}},(profile.notes||'').replace(/^\*?\*?Client Summary:?\*?\*?\s*/i,'').replace(/^\*?\*?Summary:?\*?\*?\s*/i,''))
-    ),
-    h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}},
-      PROFILE_FIELDS.map(f=>h('div',{key:f.key,style:{background:C.surface,borderRadius:6,padding:'8px 10px'}},
-        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.06em',marginBottom:3}},f.label.toUpperCase()),
-        h('div',{style:{color:val(f.key)==='Unknown'?C.muted:C.text,fontSize:12,fontStyle:val(f.key)==='Unknown'?'italic':'normal'}},val(f.key))
-      ))
-    ),
-    profile.businesses?.length>0&&h('div',{style:{marginTop:8,background:C.surface,borderRadius:6,padding:'8px 10px'}},
-      h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.06em',marginBottom:4}},'BUSINESSES / ENTITIES'),
-      h('div',{style:{display:'flex',flexWrap:'wrap',gap:6}},
-        profile.businesses.map((b,i)=>h(Tag,{key:i,color:C.accent},b))
-      )
     )
   );
 }
@@ -401,8 +208,7 @@ function EditableList({items,onChange}){
   return h('div',{style:{display:'flex',flexDirection:'column',gap:4}},
     (items||[]).map(function(item,i){
       return h('div',{key:i,style:{display:'flex',gap:6,alignItems:'flex-start'}},
-        h('textarea',{value:item,rows:2,
-          onChange:function(e){var n=items.slice();n[i]=e.target.value;onChange(n);},
+        h('textarea',{value:item,rows:2,onChange:function(e){var n=items.slice();n[i]=e.target.value;onChange(n);},
           style:{flex:1,background:C.bg,border:'1px solid '+C.border,borderRadius:4,padding:'5px 8px',color:C.text,fontSize:12,fontFamily:'inherit',resize:'vertical'}}),
         h('button',{onClick:function(){onChange(items.filter(function(_,j){return j!==i;}));},
           style:{background:'none',border:'none',color:C.danger,cursor:'pointer',fontSize:16,padding:'4px',flexShrink:0}},'x')
@@ -414,33 +220,27 @@ function EditableList({items,onChange}){
   );
 }
 
-function SessionCard({session:s,index,total,clientName,onSave}){
-  const [open,setOpen]=useState(index===0);
-  const [editing,setEditing]=useState(false);
-  const [draft,setDraft]=useState(null);
-
+function SessionCard({session:s,index,total,clientName,onSave,onDelete}){
+  var [open,setOpen]=useState(index===0);
+  var [editing,setEditing]=useState(false);
+  var [draft,setDraft]=useState(null);
   function startEdit(){setDraft(JSON.parse(JSON.stringify(s)));setEditing(true);setOpen(true);}
   function cancelEdit(){setEditing(false);setDraft(null);}
   function saveEdit(){onSave(draft);setEditing(false);setDraft(null);}
   function upd(key,val){setDraft(function(p){var n=Object.assign({},p);n[key]=val;return n;});}
   function updEmail(key,val){setDraft(function(p){var n=Object.assign({},p);n.followUpEmail=Object.assign({},p.followUpEmail||{});n.followUpEmail[key]=val;return n;});}
-
   var cur=editing?draft:s;
-
   return h('div',{style:{background:C.card,border:'1px solid '+(editing?C.accent:C.border),borderRadius:10,marginBottom:10,overflow:'hidden'}},
     h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',userSelect:'none'}},
-      h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',flex:1,cursor:editing?'default':'pointer'},
-        onClick:function(){if(!editing)setOpen(function(o){return !o;});}},
+      h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',flex:1,cursor:editing?'default':'pointer'},onClick:function(){if(!editing)setOpen(function(o){return !o;});}},
         editing
-          ? h('div',{style:{display:'flex',gap:8,flexWrap:'wrap'}},
-              h('input',{value:draft.date||'',onChange:function(e){upd('date',e.target.value);},
-                onClick:function(e){e.stopPropagation();},placeholder:'Date',
+          ?h('div',{style:{display:'flex',gap:8,flexWrap:'wrap'}},
+              h('input',{value:draft.date||'',onChange:function(e){upd('date',e.target.value);},onClick:function(e){e.stopPropagation();},placeholder:'Date',
                 style:{background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'3px 8px',color:C.accent,fontSize:13,fontWeight:600,fontFamily:'inherit',width:160}}),
-              h('input',{value:draft.meetingType||'',onChange:function(e){upd('meetingType',e.target.value);},
-                onClick:function(e){e.stopPropagation();},placeholder:'Meeting type',
+              h('input',{value:draft.meetingType||'',onChange:function(e){upd('meetingType',e.target.value);},onClick:function(e){e.stopPropagation();},placeholder:'Meeting type',
                 style:{background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'3px 8px',color:C.text,fontSize:12,fontFamily:'inherit',width:160}})
             )
-          : h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
+          :h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
               h('span',{style:{color:C.accent,fontSize:13,fontWeight:600}},s.date),
               s.meetingType&&h(Tag,{color:C.accent},s.meetingType),
               s.flags&&s.flags.length>0&&h(Tag,{color:C.warn},s.flags.length+' flag'+(s.flags.length>1?'s':''))
@@ -450,12 +250,14 @@ function SessionCard({session:s,index,total,clientName,onSave}){
         !editing&&h(Tag,{color:C.muted},'Session '+(total-index)),
         !editing&&h(CopyBtn,{getText:function(){return formatForCopy(s,clientName);},label:'Copy'}),
         editing
-          ? h('div',{style:{display:'flex',gap:6}},
+          ?h('div',{style:{display:'flex',gap:6}},
               h('button',{onClick:saveEdit,style:{background:C.accent,color:C.bg,border:'none',borderRadius:4,padding:'4px 12px',fontSize:11,fontWeight:700,cursor:'pointer',fontFamily:'inherit'}},'Save'),
               h('button',{onClick:cancelEdit,style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'4px 10px',fontSize:11,color:C.muted,cursor:'pointer',fontFamily:'inherit'}},'Cancel')
             )
-          : h('button',{onClick:function(e){e.stopPropagation();startEdit();},
-              style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'3px 10px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Edit'),
+          :h('div',{style:{display:'flex',gap:6}},
+              h('button',{onClick:function(e){e.stopPropagation();startEdit();},style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'3px 10px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Edit'),
+              h('button',{onClick:function(e){e.stopPropagation();if(confirm('Delete this session?'))onDelete();},style:{background:'transparent',border:'1px solid '+C.danger+'44',borderRadius:4,padding:'3px 10px',color:C.danger,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Delete')
+            ),
         !editing&&h('span',{onClick:function(){setOpen(function(o){return !o;});},style:{color:C.muted,fontSize:14,marginLeft:4,cursor:'pointer'}},open?'▲':'▼')
       )
     ),
@@ -464,10 +266,9 @@ function SessionCard({session:s,index,total,clientName,onSave}){
     open&&h('div',{style:{padding:'0 18px 18px',borderTop:'1px solid '+C.border}},
       h('div',{style:{marginBottom:14,marginTop:14}},
         h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'SUMMARY'),
-        editing
-          ? h('textarea',{value:draft.summary||'',rows:3,onChange:function(e){upd('summary',e.target.value);},
-              style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'8px 10px',color:C.text,fontSize:13,fontFamily:'inherit',lineHeight:1.6,resize:'vertical'}})
-          : h('p',{style:{color:C.text,fontSize:13,lineHeight:1.65,margin:0}},s.summary)
+        editing?h('textarea',{value:draft.summary||'',rows:3,onChange:function(e){upd('summary',e.target.value);},
+          style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'8px 10px',color:C.text,fontSize:13,fontFamily:'inherit',lineHeight:1.6,resize:'vertical'}})
+          :h('p',{style:{color:C.text,fontSize:13,lineHeight:1.65,margin:0}},s.summary)
       ),
       (editing||(s.flags&&s.flags.length>0))&&h('div',{style:{marginBottom:12}},
         h('div',{style:{color:C.warn,fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'FLAGS'),
@@ -487,291 +288,508 @@ function SessionCard({session:s,index,total,clientName,onSave}){
       (editing||(s.mtsTasks&&s.mtsTasks.length>0))&&h('div',{style:{marginBottom:12}},
         h('div',{style:{color:C.accent,fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'MTS TASKS'),
         editing?h(EditableList,{items:draft.mtsTasks||[],onChange:function(v){upd('mtsTasks',v);}})
-          :(s.mtsTasks||[]).map(function(t,j){return h('div',{key:j,style:{color:C.text,fontSize:12,padding:'3px 0'}},t);})
+          :(s.mtsTasks||[]).map(function(t,j){return h('div',{key:j,style:{color:C.text,fontSize:12,padding:'3px 0'}},'- '+t);})
       ),
       (editing||s.followUpEmail)&&h('div',{style:{marginBottom:12}},
         h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'FOLLOW-UP EMAIL'),
-        editing
-          ? h('div',null,
-              h('input',{value:(draft.followUpEmail||{}).subject||'',placeholder:'Subject',
-                onChange:function(e){updEmail('subject',e.target.value);},
-                style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'6px 10px',color:C.text,fontSize:12,fontFamily:'inherit',marginBottom:6}}),
-              h('textarea',{value:(draft.followUpEmail||{}).body||'',rows:8,
-                onChange:function(e){updEmail('body',e.target.value);},
-                style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'6px 10px',color:C.text,fontSize:12,fontFamily:'inherit',lineHeight:1.65,resize:'vertical'}})
-            )
-          : s.followUpEmail&&h('div',{style:{background:C.surface,borderRadius:6,padding:'10px 14px',border:'1px solid '+C.border}},
-              h('div',{style:{color:C.accent,fontSize:11,fontWeight:700,marginBottom:6}},'SUBJECT: '+s.followUpEmail.subject),
-              h('pre',{style:{color:C.text,fontSize:12,lineHeight:1.65,whiteSpace:'pre-wrap',fontFamily:'inherit'}},s.followUpEmail.body)
-            )
+        editing?h('div',null,
+          h('input',{value:(draft.followUpEmail||{}).subject||'',placeholder:'Subject',onChange:function(e){updEmail('subject',e.target.value);},
+            style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'6px 10px',color:C.text,fontSize:12,fontFamily:'inherit',marginBottom:6}}),
+          h('textarea',{value:(draft.followUpEmail||{}).body||'',rows:8,onChange:function(e){updEmail('body',e.target.value);},
+            style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'6px 10px',color:C.text,fontSize:12,fontFamily:'inherit',lineHeight:1.65,resize:'vertical'}})
+        )
+        :s.followUpEmail&&h('div',{style:{background:C.surface,borderRadius:6,padding:'10px 14px',border:'1px solid '+C.border}},
+          h('div',{style:{color:C.accent,fontSize:11,fontWeight:700,marginBottom:6}},'SUBJECT: '+s.followUpEmail.subject),
+          h('pre',{style:{color:C.text,fontSize:12,lineHeight:1.65,whiteSpace:'pre-wrap',fontFamily:'inherit'}},s.followUpEmail.body)
+        )
       ),
       (editing||(s.nextAgenda&&s.nextAgenda.length>0))&&h('div',{style:{marginTop:4}},
-        h('div',{style:{color:'#7B9FD4',fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'NEXT AGENDA'),
+        h('div',{style:{color:C.blue,fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'NEXT AGENDA'),
         editing?h(EditableList,{items:draft.nextAgenda||[],onChange:function(v){upd('nextAgenda',v);}})
-          : h('div',{style:{padding:'8px 12px',background:C.surface,borderRadius:6,fontSize:12,color:C.muted}},
-              h('span',{style:{color:'#7B9FD4',fontWeight:600}},'Next agenda: '),
-              (s.nextAgenda||[]).join(' - ')
-            )
+          :h('div',{style:{padding:'8px 12px',background:C.surface,borderRadius:6,fontSize:12,color:C.muted}},
+            h('span',{style:{color:C.blue,fontWeight:600}},'Next agenda: '),
+            (s.nextAgenda||[]).join(' - ')
+          )
       )
     )
   );
 }
 
-// ── Supabase Key Modal ───────────────────────────────────────────────────────
-function SbKeyModal({onSave}){
-  var [val,setVal]=useState('');
-  return h('div',{className:'modal-bg'},
-    h('div',{className:'modal'},
-      h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,marginBottom:8,color:C.text}},'Connect to Database'),
-      h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.65,marginBottom:24}},'Enter your Supabase anon key to sync client data across devices. Found in Supabase → Settings → API.'),
-      h('div',{style:{marginBottom:8,color:C.muted,fontSize:11,fontWeight:600,letterSpacing:'0.08em'}},'SUPABASE ANON KEY'),
-      h('input',{value:val,onChange:function(e){setVal(e.target.value);},
-        onKeyDown:function(e){if(e.key==='Enter'&&val.length>10)onSave(val);},
-        placeholder:'sb_publishable_...',type:'password',autoFocus:true,
-        style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit',marginBottom:16}}),
-      h('button',{onClick:function(){onSave(val);},disabled:val.length<10,
-        style:{width:'100%',background:val.length>=10?C.accent:C.accentDim,color:C.bg,border:'none',borderRadius:6,padding:'10px',fontSize:13,fontWeight:700,cursor:val.length>=10?'pointer':'not-allowed',fontFamily:'inherit'}},
-        'Connect →')
+// ── Business Card ─────────────────────────────────────────────────────────────
+const BIZ_FIELDS=[
+  {key:'entity_type',label:'Entity Type',placeholder:'S-Corp, LLC, Partnership...'},
+  {key:'ein',label:'EIN',placeholder:'XX-XXXXXXX'},
+  {key:'state',label:'State',placeholder:'CA, NY...'},
+  {key:'industry',label:'Industry',placeholder:'Healthcare, Real Estate...'},
+  {key:'role',label:'Client Role',placeholder:'Owner, Partner, Member...'},
+  {key:'ownership_pct',label:'Ownership %',placeholder:'50%, 33.33%...'},
+  {key:'fiscal_year_end',label:'Fiscal Year End',placeholder:'December 31'},
+  {key:'payroll_status',label:'Payroll Status',placeholder:'Active, None, Pending...'},
+  {key:'accounting_software',label:'Accounting Software',placeholder:'QuickBooks, Xero...'},
+];
+
+function BusinessCard({biz,onSave,onDelete}){
+  var [editing,setEditing]=useState(false);
+  var [draft,setDraft]=useState(null);
+  function startEdit(){setDraft(Object.assign({},biz));setEditing(true);}
+  function cancelEdit(){setEditing(false);setDraft(null);}
+  function saveEdit(){onSave(draft);setEditing(false);setDraft(null);}
+  function upd(k,v){setDraft(function(p){var n=Object.assign({},p);n[k]=v;return n;});}
+  return h('div',{style:{background:C.card,border:'1px solid '+(editing?C.accent:C.border),borderRadius:10,padding:16,marginBottom:10}},
+    h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:editing?16:0}},
+      editing
+        ?h('input',{value:draft.name||'',onChange:function(e){upd('name',e.target.value);},placeholder:'Business name',
+            style:{background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'6px 10px',color:C.text,fontSize:15,fontWeight:700,fontFamily:"'Playfair Display',serif",flex:1,marginRight:10}})
+        :h('div',null,
+            h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:15,fontWeight:700,color:C.text}},biz.name),
+            biz.entity_type&&h('div',{style:{color:C.muted,fontSize:12,marginTop:2}},biz.entity_type+(biz.state?' · '+biz.state:'')+(biz.ownership_pct?' · '+biz.ownership_pct:''))
+          ),
+      h('div',{style:{display:'flex',gap:6}},
+        editing
+          ?h('div',{style:{display:'flex',gap:6}},
+              h('button',{onClick:saveEdit,style:{background:C.accent,color:C.bg,border:'none',borderRadius:4,padding:'4px 12px',fontSize:11,fontWeight:700,cursor:'pointer',fontFamily:'inherit'}},'Save'),
+              h('button',{onClick:cancelEdit,style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'4px 10px',fontSize:11,color:C.muted,cursor:'pointer',fontFamily:'inherit'}},'Cancel')
+            )
+          :h('div',{style:{display:'flex',gap:6}},
+              h('button',{onClick:startEdit,style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'3px 10px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Edit'),
+              h('button',{onClick:function(){if(confirm('Delete '+biz.name+'?'))onDelete();},style:{background:'transparent',border:'1px solid '+C.danger+'44',borderRadius:4,padding:'3px 10px',color:C.danger,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Delete')
+            )
+      )
+    ),
+    editing&&h('div',null,
+      h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}},
+        BIZ_FIELDS.map(function(f){
+          return h('div',{key:f.key},
+            h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.06em',marginBottom:3}},f.label.toUpperCase()),
+            h('input',{value:draft[f.key]||'',onChange:function(e){upd(f.key,e.target.value);},placeholder:f.placeholder,
+              style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'6px 8px',color:C.text,fontSize:12,fontFamily:'inherit'}})
+          );
+        })
+      ),
+      h('div',null,
+        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.06em',marginBottom:3}},'NOTES'),
+        h('textarea',{value:draft.notes||'',rows:2,onChange:function(e){upd('notes',e.target.value);},placeholder:'Additional notes...',
+          style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'6px 8px',color:C.text,fontSize:12,fontFamily:'inherit',resize:'vertical'}})
+      )
+    ),
+    !editing&&h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginTop:12}},
+      BIZ_FIELDS.filter(function(f){return biz[f.key];}).map(function(f){
+        return h('div',{key:f.key,style:{background:C.surface,borderRadius:4,padding:'6px 8px'}},
+          h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.06em',marginBottom:2}},f.label.toUpperCase()),
+          h('div',{style:{color:C.text,fontSize:12}},biz[f.key])
+        );
+      }),
+      biz.notes&&h('div',{key:'notes',style:{background:C.surface,borderRadius:4,padding:'6px 8px',gridColumn:'1/-1'}},
+        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.06em',marginBottom:2}},'NOTES'),
+        h('div',{style:{color:C.text,fontSize:12}},biz.notes)
+      )
     )
   );
 }
 
-// ── Password Gate ─────────────────────────────────────────────────────────────
+// ── Profile fields ────────────────────────────────────────────────────────────
+const PROFILE_FIELDS=[
+  {key:'phone',label:'Phone'},
+  {key:'email',label:'Email'},
+  {key:'industry',label:'Industry'},
+  {key:'filingStatus',label:'Tax Filing Status'},
+  {key:'spouse',label:'Spouse'},
+  {key:'serviceType',label:'Service Type'},
+  {key:'lastMeetingDate',label:'Last Meeting Date'},
+];
+
+function ProfileCard({profile,editing,onChange}){
+  profile=profile||{};
+  var val=function(k){return profile[k]||'Unknown';};
+  if(editing){
+    return h('div',{style:{display:'flex',flexDirection:'column',gap:10}},
+      PROFILE_FIELDS.map(function(f){
+        return h('div',{key:f.key},
+          h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},f.label.toUpperCase()),
+          h('input',{value:profile[f.key]||'',onChange:function(e){onChange(f.key,e.target.value);},
+            style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit'}})
+        );
+      }),
+      h('div',null,
+        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},'CLIENT NOTES'),
+        h('textarea',{value:profile.notes||'',onChange:function(e){onChange('notes',e.target.value);},rows:3,
+          style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit',resize:'vertical'}})
+      )
+    );
+  }
+  return h('div',null,
+    profile.notes&&h('div',{style:{background:C.surface,borderRadius:8,padding:'12px 14px',marginBottom:14,borderLeft:'3px solid '+C.accent}},
+      h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:6}},'CLIENT OVERVIEW'),
+      h('p',{style:{color:C.text,fontSize:13,lineHeight:1.65,margin:0}},(profile.notes||'').replace(/^\*?\*?Client Summary:?\*?\*?\s*/i,'').replace(/^\*?\*?Summary:?\*?\*?\s*/i,''))
+    ),
+    h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}},
+      PROFILE_FIELDS.map(function(f){
+        return h('div',{key:f.key,style:{background:C.surface,borderRadius:6,padding:'8px 10px'}},
+          h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.06em',marginBottom:3}},f.label.toUpperCase()),
+          h('div',{style:{color:val(f.key)==='Unknown'?C.muted:C.text,fontSize:12,fontStyle:val(f.key)==='Unknown'?'italic':'normal'}},val(f.key))
+        );
+      })
+    )
+  );
+}
+
+function BusinessesInput({value,onChange}){
+  var [text,setText]=useState((value||[]).join(', '));
+  useEffect(function(){setText((value||[]).join(', '));},[(value||[]).join(',')]);
+  return h('div',null,
+    h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},'BUSINESSES / ENTITIES'),
+    h('input',{value:text,onChange:function(e){setText(e.target.value);},
+      onBlur:function(e){onChange(e.target.value.split(',').map(function(s){return s.trim();}).filter(Boolean));},
+      placeholder:'e.g. Athena Holdings, Daria Wellness (comma separated)',
+      style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit'}}),
+    h('div',{style:{color:C.muted,fontSize:10,marginTop:4}},'Separate with commas')
+  );
+}
+
+// ── Gate screens ──────────────────────────────────────────────────────────────
 function PasswordGate({onUnlock}){
-  const [val,setVal]=useState('');
-  const [err,setErr]=useState(false);
-  const check=()=>{if(val===SITE_PASSWORD){localStorage.setItem('mts_unlocked','true');onUnlock();}else{setErr(true);setVal('');}};
-  return h('div',{className:'modal-bg'},
-    h('div',{className:'modal'},
-      h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,marginBottom:8,color:C.text}},'MTS Meeting Agent'),
-      h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.65,marginBottom:24}},'Enter the access password to continue.'),
-      h('div',{style:{marginBottom:8,color:C.muted,fontSize:11,fontWeight:600,letterSpacing:'0.08em'}},'PASSWORD'),
-      h('input',{value:val,onChange:e=>{setVal(e.target.value);setErr(false);},onKeyDown:e=>e.key==='Enter'&&check(),
-        placeholder:'Enter password',type:'password',autoFocus:true,
-        style:{width:'100%',background:C.surface,border:'1px solid '+(err?C.danger:C.border),borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit',marginBottom:err?6:16}}),
-      err&&h('div',{style:{color:C.danger,fontSize:12,marginBottom:14}},'Incorrect password. Try again.'),
-      h('button',{onClick:check,disabled:!val,
-        style:{width:'100%',background:val?C.accent:C.accentDim,color:C.bg,border:'none',borderRadius:6,padding:'10px',fontSize:13,fontWeight:700,cursor:val?'pointer':'not-allowed',fontFamily:'inherit'}},
-        'Unlock →')
-    )
-  );
+  var [val,setVal]=useState('');
+  var [err,setErr]=useState(false);
+  function check(){if(val===SITE_PASSWORD){localStorage.setItem('mts_unlocked','true');onUnlock();}else{setErr(true);setVal('');}}
+  return h('div',{className:'modal-bg'},h('div',{className:'modal'},
+    h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,marginBottom:8,color:C.text}},'MTS Intelligence'),
+    h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.65,marginBottom:24}},'Enter the access password to continue.'),
+    h('div',{style:{marginBottom:8,color:C.muted,fontSize:11,fontWeight:600,letterSpacing:'0.08em'}},'PASSWORD'),
+    h('input',{value:val,onChange:function(e){setVal(e.target.value);setErr(false);},onKeyDown:function(e){if(e.key==='Enter')check();},placeholder:'Enter password',type:'password',autoFocus:true,
+      style:{width:'100%',background:C.surface,border:'1px solid '+(err?C.danger:C.border),borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit',marginBottom:err?6:16}}),
+    err&&h('div',{style:{color:C.danger,fontSize:12,marginBottom:14}},'Incorrect password.'),
+    h('button',{onClick:check,disabled:!val,style:{width:'100%',background:val?C.accent:C.accentDim,color:C.bg,border:'none',borderRadius:6,padding:'10px',fontSize:13,fontWeight:700,cursor:val?'pointer':'not-allowed',fontFamily:'inherit'}},'Unlock →')
+  ));
 }
 
-// ── API Key Modal ─────────────────────────────────────────────────────────────
 function ApiKeyModal({onSave}){
-  const [val,setVal]=useState('');
-  return h('div',{className:'modal-bg'},
-    h('div',{className:'modal'},
-      h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,marginBottom:8,color:C.text}},'Welcome to MTS Meeting Agent'),
-      h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.65,marginBottom:24}},"Enter your Anthropic API key. It's saved locally in your browser only."),
-      h('div',{style:{marginBottom:8,color:C.muted,fontSize:11,fontWeight:600,letterSpacing:'0.08em'}},'ANTHROPIC API KEY'),
-      h('input',{value:val,onChange:e=>setVal(e.target.value),onKeyDown:e=>e.key==='Enter'&&val.startsWith('sk-')&&onSave(val),
-        placeholder:'sk-ant-...',type:'password',
-        style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit',marginBottom:16}}),
-      h('p',{style:{color:C.muted,fontSize:11,marginBottom:20,lineHeight:1.6}},
-        'Get your key at ',h('a',{href:'https://console.anthropic.com',target:'_blank',rel:'noreferrer',style:{color:C.accent}},'console.anthropic.com'),' → API Keys'),
-      h('button',{onClick:()=>onSave(val),disabled:!val.startsWith('sk-'),
-        style:{width:'100%',background:val.startsWith('sk-')?C.accent:C.accentDim,color:C.bg,border:'none',borderRadius:6,padding:'10px',fontSize:13,fontWeight:700,cursor:val.startsWith('sk-')?'pointer':'not-allowed',fontFamily:'inherit'}},
-        'Save & Continue →')
-    )
-  );
+  var [val,setVal]=useState('');
+  return h('div',{className:'modal-bg'},h('div',{className:'modal'},
+    h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,marginBottom:8,color:C.text}},'Anthropic API Key'),
+    h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.65,marginBottom:24}},'Saved locally to your browser only.'),
+    h('input',{value:val,onChange:function(e){setVal(e.target.value);},onKeyDown:function(e){if(e.key==='Enter'&&val.startsWith('sk-'))onSave(val);},placeholder:'sk-ant-...',type:'password',
+      style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit',marginBottom:16}}),
+    h('button',{onClick:function(){onSave(val);},disabled:!val.startsWith('sk-'),style:{width:'100%',background:val.startsWith('sk-')?C.accent:C.accentDim,color:C.bg,border:'none',borderRadius:6,padding:'10px',fontSize:13,fontWeight:700,cursor:val.startsWith('sk-')?'pointer':'not-allowed',fontFamily:'inherit'}},'Save & Continue →')
+  ));
 }
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 function App(){
-  const [unlocked,setUnlocked]=useState(()=>localStorage.getItem('mts_unlocked')==='true');
-  const [apiKey,setApiKey]=useState(()=>getApiKey());
-  const [sbKey,setSbKey]=useState(()=>getSbKey());
-  const [dbLoading,setDbLoading]=useState(false);
-  const [view,setView]=useState(()=>sessionStorage.getItem('mts_view')||'input');
-  const [transcript,setTranscript]=useState('');
-  const [result,setResult]=useState(null);
-  const [status,setStatus]=useState('idle');
-  const [errorMsg,setErrorMsg]=useState('');
-  const [clients,setClients]=useState(()=>listClients());
-  useEffect(function(){if(sbKey){sbListClients(sbKey).then(function(names){setClients(names);}).catch(function(e){console.error('initial load',e);});}}, [sbKey]);
-  const [detailClient,setDetailClient]=useState(()=>sessionStorage.getItem('mts_detail_client')||null);
-  const [detailData,setDetailData]=useState(()=>{
-    var n=sessionStorage.getItem('mts_detail_client');
-    return n?loadClient(n):null;
-  });
-  const [editingProfile,setEditingProfile]=useState(false);
-  const [generatingProfile,setGeneratingProfile]=useState(false);
-  const [editingName,setEditingName]=useState(false);
-  const [nameDraft,setNameDraft]=useState('');
-  const [profileDraft,setProfileDraft]=useState({});
-  const [clientSearch,setClientSearch]=useState(()=>sessionStorage.getItem('mts_search')||'');
-  const [checkedC,setCheckedC]=useState([]);
-  const [checkedM,setCheckedM]=useState([]);
-  const [agendaClient,setAgendaClient]=useState('');
-  const [agendaResult,setAgendaResult]=useState('');
-  const [agendaLoading,setAgendaLoading]=useState(false);
-  const resultRef=useRef(null);
+  var [unlocked,setUnlocked]=useState(function(){return localStorage.getItem('mts_unlocked')==='true';});
+  var [apiKey,setApiKey]=useState(function(){return getApiKey();});
+  var sbKey=getSbKey();
 
-  async function refreshClients(){
-    if(sbKey){
-      try { var names=await sbListClients(sbKey); setClients(names); return; } catch(e){console.error('sbList error',e);}
+  var [view,setView]=useState(function(){return getView();});
+  var [clients,setClients]=useState([]);
+  var [recentSessions,setRecentSessions]=useState([]);
+  var [homeLoading,setHomeLoading]=useState(false);
+
+  // New meeting
+  var [transcript,setTranscript]=useState('');
+  var [result,setResult]=useState(null);
+  var [status,setStatus]=useState('idle');
+  var [errorMsg,setErrorMsg]=useState('');
+  var [checkedC,setCheckedC]=useState([]);
+  var [checkedM,setCheckedM]=useState([]);
+  var resultRef=useRef(null);
+
+  // Agenda
+  var [agendaClient,setAgendaClient]=useState('');
+  var [agendaResult,setAgendaResult]=useState('');
+  var [agendaLoading,setAgendaLoading]=useState(false);
+
+  // Client detail
+  var [detailClient,setDetailClient]=useState(function(){return getDetailClient();});
+  var [detailData,setDetailData]=useState(null);
+  var [detailBizzes,setDetailBizzes]=useState([]);
+  var [clientSearch,setClientSearch]=useState('');
+  var [editingProfile,setEditingProfile]=useState(false);
+  var [profileDraft,setProfileDraft]=useState({});
+  var [generatingProfile,setGeneratingProfile]=useState(false);
+  var [editingName,setEditingName]=useState(false);
+  var [nameDraft,setNameDraft]=useState('');
+  var [detailLoading,setDetailLoading]=useState(false);
+  var [addingBiz,setAddingBiz]=useState(false);
+  var [newBiz,setNewBiz]=useState({name:''});
+
+  function nav(v){setView(v);setViewSS(v);}
+  function navClient(name,data){setDetailClient(name);setDetailClientSS(name);setDetailData(data);setProfileDraft(data&&data.profile?data.profile:{});setEditingProfile(false);setEditingName(false);}
+
+  // Load home data
+  useEffect(function(){
+    if(view==='home'){loadHomeData();}
+  },[view]);
+
+  async function loadHomeData(){
+    setHomeLoading(true);
+    try{
+      var cls=await sbGet('clients',{order:'updated_at.desc',select:'name,profile',limit:'20'},sbKey);
+      setClients((cls||[]).map(function(c){return c.name;}));
+      var sess=await sbGet('sessions',{order:'created_at.desc',select:'client_name,meeting_date,meeting_type,summary',limit:'5'},sbKey);
+      setRecentSessions(sess||[]);
+    }catch(e){console.error(e);}
+    setHomeLoading(false);
+  }
+
+  // Load clients list
+  useEffect(function(){
+    if(view==='clients'&&!detailClient){
+      sbGet('clients',{order:'name.asc',select:'name,profile'},sbKey).then(function(r){setClients((r||[]).map(function(c){return c.name;}));}).catch(function(e){console.error(e);});
     }
-    setClients(listClients());
+  },[view,detailClient]);
+
+  // Load client detail
+  useEffect(function(){
+    if(detailClient&&!detailData){loadDetail(detailClient);}
+  },[detailClient]);
+
+  async function loadDetail(name){
+    setDetailLoading(true);
+    try{
+      var cls=await sbGet('clients',{'name':'eq.'+name,'limit':'1'},sbKey);
+      if(!cls||!cls.length){setDetailLoading(false);return;}
+      var cl=cls[0];
+      var sess=await sbGet('sessions',{'client_id':'eq.'+cl.id,'order':'created_at.asc'},sbKey);
+      var ghosts=await sbGet('ghost_items',{'client_id':'eq.'+cl.id,'resolved':'eq.false'},sbKey);
+      var bizzes=await sbGet('businesses',{'client_id':'eq.'+cl.id,'order':'created_at.asc'},sbKey);
+      var data={id:cl.id,profile:cl.profile||{},openItems:(ghosts||[]).map(function(g){return g.summary;}),
+        sessions:(sess||[]).map(function(s){return {id:s.id,date:s.meeting_date,meetingType:s.meeting_type,attendees:s.attendees,summary:s.summary,notesAndQuestions:s.notes_and_questions,clientNextSteps:s.client_next_steps,mtsTasks:s.mts_tasks,nextAgenda:s.next_agenda,followUpEmail:s.follow_up_email,flags:s.flags,ghostItems:s.ghost_items};})};
+      setDetailData(data);
+      setDetailBizzes(bizzes||[]);
+      setProfileDraft(data.profile||{});
+      // Auto-generate profile if sparse
+      var p=data.profile||{};
+      var hasInfo=p.notes||(p.businesses&&p.businesses.length>0)||(p.serviceType&&p.serviceType!=='Unknown');
+      if(!hasInfo&&data.sessions&&data.sessions.length>0){
+        setGeneratingProfile(true);
+        runProfileGen(name,data,apiKey).then(function(generated){
+          if(!generated) return;
+          var merged=Object.assign({},p);
+          Object.entries(generated).forEach(function(kv){var k=kv[0],v=kv[1];if(!merged[k]||merged[k]==='Unknown'||merged[k]===''||(Array.isArray(merged[k])&&merged[k].length===0))merged[k]=v;});
+          var ss=data.sessions||[];if(ss.length)merged.lastMeetingDate=ss[ss.length-1].date||'';
+          return sbPatch('clients',{profile:merged},{id:cl.id},sbKey).then(function(){
+            setDetailData(function(prev){return Object.assign({},prev,{profile:merged});});
+            setProfileDraft(merged);
+          });
+        }).catch(function(e){console.error(e);}).finally(function(){setGeneratingProfile(false);});
+      }
+    }catch(e){console.error(e);}
+    setDetailLoading(false);
   }
-  function persistView(v){sessionStorage.setItem('mts_view',v);setView(v);}
-  function persistDetail(name,data){
-    if(name){sessionStorage.setItem('mts_detail_client',name);}
-    else{sessionStorage.removeItem('mts_detail_client');}
-    setDetailClient(name);setDetailData(data);
-  }
-  const filteredClients=clients.filter(n=>n.toLowerCase().includes(clientSearch.toLowerCase()));
 
   async function handleProcess(){
     if(!transcript.trim()) return;
     setStatus('loading');setErrorMsg('');
     try{
-      const nameMatch=transcript.match(/(?:client|with|for)[:\s]+([A-Z][a-zA-Z\s&.'-]{2,35})/i);
-      const guessName=nameMatch?.[1]?.trim()||'';
-      const history=guessName?loadClient(guessName):null;
-      const parsed=await runAgent(transcript,history,apiKey);
+      // Try to find existing client for context
+      var parsed=await runAgent(transcript,null,apiKey);
       setResult(parsed);setCheckedC([]);setCheckedM([]);
-      const cn=parsed.clientName;
-      const existing=loadClient(cn)||{sessions:[],openItems:[],profile:{}};
-      const newProfile=parsed.clientProfile||{};
-      const merged={...existing.profile};
-      Object.entries(newProfile).forEach(([k,v])=>{
-        if(k==='lastMeetingDate') return; // handled below
-        if(v&&v!=='Unknown'&&v!==''&&!(Array.isArray(v)&&v.length===0)) merged[k]=v;
-      });
-      existing.sessions.push({
-        date:parsed.meetingDate||new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}),
-        meetingType:parsed.meetingType,summary:parsed.summary,
-        notesAndQuestions:parsed.notesAndQuestions,clientNextSteps:parsed.clientNextSteps,
-        mtsTasks:parsed.mtsTasks,nextAgenda:parsed.nextAgenda,
-        followUpEmail:parsed.followUpEmail,flags:parsed.flags,ghostItems:parsed.ghostItems,
-      });
-      existing.openItems=[...(parsed.ghostItems||[]),...(parsed.mtsTasks||[]).filter(function(t){return /pending|follow|outstanding|need|waiting/i.test(t);})].slice(0,12);
-      var allDates2 = existing.sessions.map(function(s){return s.date;}).filter(Boolean);
-      merged.lastMeetingDate = allDates2.length ? allDates2[allDates2.length-1] : '';
-      existing.profile=merged;
-      var newSession = {
-        date: parsed.meetingDate||new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}),
-        meetingType: parsed.meetingType, attendees: parsed.attendees, summary: parsed.summary,
-        notesAndQuestions: parsed.notesAndQuestions, clientNextSteps: parsed.clientNextSteps,
-        mtsTasks: parsed.mtsTasks, nextAgenda: parsed.nextAgenda,
-        followUpEmail: parsed.followUpEmail, flags: parsed.flags, ghostItems: parsed.ghostItems
-      };
-      if(sbKey) {
-        sbSaveSession(cn, newSession, sbKey).then(function(newId){ if(newId) newSession.id=newId; }).catch(function(e){console.error('sbSaveSession',e);});
-        sbUpdateClientProfile(cn, merged, existing.openItems, sbKey).catch(function(e){console.error('sbUpdateProfile',e);});
+      var cn=parsed.clientName;
+      // Upsert client
+      var existing=await sbGet('clients',{'name':'eq.'+cn,'limit':'1'},sbKey);
+      var clientId;
+      var oldProfile={};
+      if(existing&&existing.length){
+        clientId=existing[0].id;
+        oldProfile=existing[0].profile||{};
+      } else {
+        var nc=await sbPost('clients',{name:cn,profile:{},open_items:[]},sbKey);
+        clientId=nc.id;
       }
-      existing.sessions.push(newSession);
-      saveClient(cn,existing);refreshClients();
-      setStatus('done');persistView('result');
-      setTimeout(()=>resultRef.current?.scrollIntoView({behavior:'smooth'}),80);
+      // Merge profile
+      var np=parsed.clientProfile||{};
+      var merged=Object.assign({},oldProfile);
+      Object.entries(np).forEach(function(kv){var k=kv[0],v=kv[1];if(v&&v!=='Unknown'&&v!==''&&!(Array.isArray(v)&&v.length===0))merged[k]=v;});
+      // Insert session
+      var session=await sbPost('sessions',{
+        client_id:clientId,client_name:cn,
+        meeting_date:parsed.meetingDate||new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}),
+        meeting_type:parsed.meetingType,attendees:parsed.attendees,hosted_by:'Momen Tax Services',
+        summary:parsed.summary,notes_and_questions:parsed.notesAndQuestions||[],
+        client_next_steps:parsed.clientNextSteps||[],mts_tasks:parsed.mtsTasks||[],
+        next_agenda:parsed.nextAgenda||[],follow_up_email:parsed.followUpEmail,
+        flags:parsed.flags||[],ghost_items:parsed.ghostItems||[]
+      },sbKey);
+      merged.lastMeetingDate=parsed.meetingDate||new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
+      await sbPatch('clients',{profile:merged,updated_at:new Date().toISOString()},{id:clientId},sbKey);
+      setStatus('done');nav('result');
+      setTimeout(function(){resultRef.current&&resultRef.current.scrollIntoView({behavior:'smooth'});},80);
     }catch(e){console.error(e);setErrorMsg(e.message||'Something went wrong.');setStatus('error');}
   }
 
-  async function handleBuildAgenda(){
-    if(!agendaClient.trim()) return;
-    setAgendaLoading(true);setAgendaResult('');
-    try{setAgendaResult(await runAgenda(agendaClient,loadClient(agendaClient),apiKey));}
-    catch(e){setAgendaResult('Error: '+e.message);}
-    setAgendaLoading(false);
-  }
-
-  async function handleViewClient(name){
-    setDbLoading(true);
-    var data = null;
-    if(sbKey){
-      try { data = await sbLoadClient(name, sbKey); } catch(e){ console.error('sbLoad',e); }
-    }
-    if(!data) data = loadClient(name);
-    setDbLoading(false);
-    persistDetail(name,data);
-    setProfileDraft(data && data.profile ? data.profile : {});
-    setEditingProfile(false);
-    persistView('clients');
-    if(data && data.sessions && data.sessions.length > 0) {
-      var profile = data.profile || {};
-      var hasInfo = profile.notes || (profile.businesses && profile.businesses.length > 0) || (profile.serviceType && profile.serviceType !== 'Unknown');
-      if(!hasInfo) {
-        setGeneratingProfile(true);
-        generateClientProfile(name, data, apiKey).then(function(generated) {
-          if(!generated) return;
-          var merged = Object.assign({}, profile);
-          Object.entries(generated).forEach(function(kv){
-            var k=kv[0], v=kv[1];
-            if(!merged[k]||merged[k]==='Unknown'||merged[k]===''||(Array.isArray(merged[k])&&merged[k].length===0)) merged[k]=v;
-          });
-          var updated = Object.assign({}, data, {profile: merged});
-          if(sbKey) sbUpdateClientProfile(name, merged, updated.openItems||[], sbKey).catch(function(e){console.error(e);});
-          saveClient(name, updated);
-          persistDetail(name, updated);
-          setProfileDraft(merged);
-        }).catch(function(e){console.error('Profile gen',e);}).finally(function(){setGeneratingProfile(false);});
-      }
-    }
-  }
-  async function handleDeleteClient(name){
-    if(!confirm('Delete all data for '+name+'?')) return;
-    if(sbKey){ try{ await sbDeleteClient(name, sbKey); }catch(e){console.error('sbDelete',e);} }
-    deleteClient(name);refreshClients();persistDetail(null,null);
-  }
-
-  function handleSaveProfile(){
+  async function handleSaveProfile(){
     if(!detailClient||!detailData) return;
-    const updated={...detailData,profile:profileDraft};
-    if(sbKey){ sbUpdateClientProfile(detailClient, profileDraft, updated.openItems||[], sbKey).catch(function(e){console.error('sbProfileSave',e);}); }
-    saveClient(detailClient,updated);persistDetail(detailClient,updated);setEditingProfile(false);
+    try{
+      await sbPatch('clients',{profile:profileDraft},{id:detailData.id},sbKey);
+      setDetailData(function(p){return Object.assign({},p,{profile:profileDraft});});
+      setEditingProfile(false);
+    }catch(e){alert('Error saving: '+e.message);}
   }
 
-  const tabs=[{id:'input',label:'New Meeting'},{id:'agenda',label:'Agenda Builder'},{id:'clients',label:'Clients'+(clients.length?' ('+clients.length+')':'')}];
+  async function handleSaveName(){
+    var newName=nameDraft.trim();
+    if(!newName||newName===detailClient){setEditingName(false);return;}
+    try{
+      await sbPatch('clients',{name:newName},{id:detailData.id},sbKey);
+      await sbPatch('sessions',{client_name:newName},{client_name:detailClient},sbKey);
+      setEditingName(false);
+      navClient(newName,Object.assign({},detailData));
+      setDetailClientSS(newName);
+    }catch(e){alert('Error renaming: '+e.message);}
+  }
 
-  if(!unlocked) return h(PasswordGate,{onUnlock:()=>setUnlocked(true)});
-  if(!apiKey) return h(ApiKeyModal,{onSave:k=>{saveApiKey(k);setApiKey(k);}});
-  if(!sbKey) return h(SbKeyModal,{onSave:function(k){saveSbKey(k);setSbKey(k);refreshClients();}});
+  async function handleDeleteClient(){
+    if(!confirm('Delete all data for '+detailClient+'?')) return;
+    try{
+      await sbDelete('clients',{id:detailData.id},sbKey);
+      setDetailClient('');setDetailClientSS('');setDetailData(null);
+      nav('clients');
+    }catch(e){alert('Error: '+e.message);}
+  }
 
+  async function handleSaveSession(updated,realIndex){
+    try{
+      if(updated.id){
+        await sbPatch('sessions',{meeting_date:updated.date,meeting_type:updated.meetingType,summary:updated.summary,notes_and_questions:updated.notesAndQuestions||[],client_next_steps:updated.clientNextSteps||[],mts_tasks:updated.mtsTasks||[],next_agenda:updated.nextAgenda||[],follow_up_email:updated.followUpEmail,flags:updated.flags||[]},{id:updated.id},sbKey);
+      }
+      setDetailData(function(prev){var sessions=prev.sessions.slice();sessions[realIndex]=updated;return Object.assign({},prev,{sessions:sessions});});
+    }catch(e){alert('Error saving session: '+e.message);}
+  }
+
+  async function handleDeleteSession(session,realIndex){
+    try{
+      if(session.id) await sbDelete('sessions',{id:session.id},sbKey);
+      setDetailData(function(prev){var sessions=prev.sessions.slice();sessions.splice(realIndex,1);return Object.assign({},prev,{sessions:sessions});});
+    }catch(e){alert('Error deleting session: '+e.message);}
+  }
+
+  async function handleSaveBiz(biz){
+    try{
+      var updated=await sbPatch('businesses',biz,{id:biz.id},sbKey);
+      setDetailBizzes(function(prev){return prev.map(function(b){return b.id===biz.id?(updated&&updated[0]?updated[0]:biz):b;});});
+    }catch(e){alert('Error saving business: '+e.message);}
+  }
+
+  async function handleDeleteBiz(bizId){
+    try{
+      await sbDelete('businesses',{id:bizId},sbKey);
+      setDetailBizzes(function(prev){return prev.filter(function(b){return b.id!==bizId;});});
+    }catch(e){alert('Error: '+e.message);}
+  }
+
+  async function handleAddBiz(){
+    if(!newBiz.name.trim()) return;
+    try{
+      var created=await sbPost('businesses',Object.assign({},newBiz,{client_id:detailData.id,client_name:detailClient}),sbKey);
+      setDetailBizzes(function(prev){return prev.concat([created]);});
+      setNewBiz({name:''});setAddingBiz(false);
+    }catch(e){alert('Error adding business: '+e.message);}
+  }
+
+  async function handleRefreshProfile(){
+    if(!detailClient||!detailData) return;
+    setGeneratingProfile(true);
+    try{
+      var generated=await runProfileGen(detailClient,detailData,apiKey);
+      if(generated){
+        var merged=Object.assign({},detailData.profile||{});
+        Object.entries(generated).forEach(function(kv){merged[kv[0]]=kv[1];});
+        var ss=detailData.sessions||[];if(ss.length)merged.lastMeetingDate=ss[ss.length-1].date||'';
+        await sbPatch('clients',{profile:merged},{id:detailData.id},sbKey);
+        setDetailData(function(p){return Object.assign({},p,{profile:merged});});
+        setProfileDraft(merged);
+      }
+    }catch(e){console.error(e);}
+    setGeneratingProfile(false);
+  }
+
+  var filteredClients=clients.filter(function(n){return n.toLowerCase().indexOf(clientSearch.toLowerCase())>=0;});
+
+  if(!unlocked) return h(PasswordGate,{onUnlock:function(){setUnlocked(true);}});
+  if(!apiKey) return h(ApiKeyModal,{onSave:function(k){saveApiKey(k);setApiKey(k);}});
+
+  // ── Layout ──────────────────────────────────────────────────────────────────
   return h('div',{style:{background:C.bg,minHeight:'100vh'}},
     // Header
     h('div',{style:{borderBottom:'1px solid '+C.border,padding:'14px 24px',display:'flex',alignItems:'center',justifyContent:'space-between',position:'sticky',top:0,background:C.bg+'f0',backdropFilter:'blur(10px)',zIndex:20,flexWrap:'wrap',gap:10}},
-      h('div',{style:{display:'flex',alignItems:'center',gap:10}},
-        h('div',{style:{width:30,height:30,background:C.accent,borderRadius:6,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14,flexShrink:0}},'MTS'),
+      h('button',{onClick:function(){nav('home');setDetailClient('');setDetailClientSS('');setDetailData(null);},style:{background:'none',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:10,fontFamily:'inherit'}},
+        h('div',{style:{width:30,height:30,background:C.accent,borderRadius:6,display:'flex',alignItems:'center',justifyContent:'center',fontSize:13,color:C.bg,fontWeight:700,flexShrink:0}},'MTS'),
         h('div',null,
-          h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:15,fontWeight:700,lineHeight:1.2,color:C.text}},'MTS Meeting Agent'),
+          h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:15,fontWeight:700,lineHeight:1.2,color:C.text}},'MTS Intelligence'),
           h('div',{style:{fontSize:10,color:C.muted,letterSpacing:'0.06em'}},'MOMEN TAX SERVICES')
         )
       ),
       h('div',{style:{display:'flex',gap:6,flexWrap:'wrap'}},
-        tabs.map(t=>h('button',{key:t.id,
-          onClick:()=>{persistView(t.id);persistDetail(null,null);setClientSearch('');},
-          style:{background:(view===t.id||(view==='result'&&t.id==='input'))?C.accent:'transparent',
-            color:(view===t.id||(view==='result'&&t.id==='input'))?C.bg:C.muted,
-            border:'1px solid '+((view===t.id||(view==='result'&&t.id==='input'))?C.accent:C.border),
-            borderRadius:6,padding:'5px 13px',fontSize:12,cursor:'pointer',fontWeight:600,fontFamily:'inherit'}},t.label)),
-        h('button',{onClick:()=>{if(confirm('Change API key?')){localStorage.removeItem('mts_anthropic_key');setApiKey('');}},
+        [{id:'home',label:'Home'},{id:'new-meeting',label:'New Meeting'},{id:'agenda',label:'Agenda Builder'},{id:'clients',label:'All Clients'}].map(function(t){
+          var active=(view===t.id)||(view==='result'&&t.id==='new-meeting')||(view==='clients'&&t.id==='clients');
+          return h('button',{key:t.id,onClick:function(){if(t.id==='clients'){setDetailClient('');setDetailClientSS('');setDetailData(null);}nav(t.id);},
+            style:{background:active?C.accent:'transparent',color:active?C.bg:C.muted,border:'1px solid '+(active?C.accent:C.border),borderRadius:6,padding:'5px 13px',fontSize:12,cursor:'pointer',fontWeight:600,fontFamily:'inherit'}},t.label);
+        }),
+        h('button',{onClick:function(){if(confirm('Change API key?')){localStorage.removeItem('mts_ak');setApiKey('');}},
           style:{background:'transparent',border:'1px solid '+C.border,color:C.muted,borderRadius:6,padding:'5px 10px',fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Settings')
       )
     ),
-    // Body
-    h('div',{style:{maxWidth:760,margin:'0 auto',padding:'28px 20px 80px'}},
 
-      // INPUT
-      view==='input'&&h('div',null,
-        h('div',{style:{marginBottom:20}},
-          h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'Process Meeting Transcript'),
-          h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.6}},'Paste a voice memo transcript, Fathom summary, or raw notes. Optionally paste the agenda at the top.')
+    h('div',{style:{maxWidth:780,margin:'0 auto',padding:'28px 20px 80px'}},
+
+      // ── HOME ───────────────────────────────────────────────────────────────
+      view==='home'&&h('div',null,
+        h('div',{style:{marginBottom:32}},
+          h('h1',{style:{fontFamily:"'Playfair Display',serif",fontSize:28,fontWeight:700,color:C.text,marginBottom:8}},'Welcome back'),
+          h('p',{style:{color:C.muted,fontSize:14}},'What do you want to do today?')
         ),
-        h('textarea',{value:transcript,onChange:e=>setTranscript(e.target.value),
-          placeholder:'Paste your transcript or meeting notes here...\n\nThe agent will automatically:\n• Detect the client name and meeting type\n• Pull their prior session history\n• Build/update the client profile\n• Generate all MTS outputs in one shot',
+        // Nav buttons
+        h('div',{style:{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,marginBottom:36}},
+          [{label:'Meeting Summary Generator',desc:'Paste a transcript and get full MTS output',view:'new-meeting',icon:'S'},
+           {label:'Agenda Builder',desc:'Generate a pre-meeting agenda from client history',view:'agenda',icon:'A'},
+           {label:'All Clients',desc:'Browse client profiles, sessions, and businesses',view:'clients',icon:'C'}
+          ].map(function(item){
+            return h('button',{key:item.view,onClick:function(){nav(item.view);},
+              style:{background:C.card,border:'1px solid '+C.border,borderRadius:12,padding:'20px 18px',cursor:'pointer',textAlign:'left',fontFamily:'inherit',transition:'border-color .2s'}},
+              h('div',{style:{width:36,height:36,background:C.accent,borderRadius:8,display:'flex',alignItems:'center',justifyContent:'center',color:C.bg,fontWeight:700,fontSize:15,marginBottom:12}},item.icon),
+              h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:15,fontWeight:700,color:C.text,marginBottom:6}},item.label),
+              h('div',{style:{color:C.muted,fontSize:12,lineHeight:1.5}},item.desc)
+            );
+          })
+        ),
+        // Recent sessions
+        h('div',null,
+          h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.08em',marginBottom:14}},'RECENT ACTIVITY'),
+          homeLoading?h('div',{style:{color:C.muted,fontSize:13,padding:20}},'Loading...')
+          :recentSessions.length===0?h('div',{style:{color:C.muted,fontSize:13,padding:20,textAlign:'center',border:'1px dashed '+C.border,borderRadius:10}},'No sessions yet. Process a transcript to get started.')
+          :recentSessions.map(function(s,i){
+            return h('div',{key:i,onClick:function(){setDetailClient(s.client_name);setDetailClientSS(s.client_name);setDetailData(null);nav('clients');},
+              style:{background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:'14px 18px',marginBottom:8,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:8}},
+              h('div',null,
+                h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:14,fontWeight:700,color:C.text,marginBottom:3}},s.client_name),
+                h('div',{style:{color:C.muted,fontSize:12}},s.meeting_date+(s.meeting_type?' — '+s.meeting_type:''))
+              ),
+              h('div',{style:{color:C.muted,fontSize:12,maxWidth:300,textAlign:'right'}},s.summary?(s.summary.slice(0,80)+(s.summary.length>80?'...':'')):'')
+            );
+          })
+        )
+      ),
+
+      // ── NEW MEETING ────────────────────────────────────────────────────────
+      view==='new-meeting'&&h('div',null,
+        h('div',{style:{marginBottom:20}},
+          h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'Meeting Summary Generator'),
+          h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.6}},'Paste a transcript, Fathom summary, or voice memo notes. Optionally paste the agenda at the top.')
+        ),
+        h('textarea',{value:transcript,onChange:function(e){setTranscript(e.target.value);},
+          placeholder:'Paste your transcript or meeting notes here...\n\nThe agent will automatically:\n• Detect the client name and meeting type\n• Build/update the client profile\n• Generate all MTS outputs in one shot',
           style:{width:'100%',minHeight:300,background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:'14px 16px',color:C.text,fontSize:13,lineHeight:1.7,fontFamily:'inherit'}}),
         h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:12}},
           h('span',{style:{color:C.muted,fontSize:12}},transcript.length>0?transcript.length.toLocaleString()+' chars':'Waiting for transcript'),
           h('div',{style:{display:'flex',gap:10,alignItems:'center'}},
-            transcript&&h(Btn,{small:true,variant:'ghost',onClick:()=>setTranscript('')},'Clear'),
-            h(Btn,{onClick:handleProcess,disabled:status==='loading'||!transcript.trim()},status==='loading'?'⏳ Processing...':'Generate Summary →')
+            transcript&&h(Btn,{small:true,variant:'ghost',onClick:function(){setTranscript('');}},  'Clear'),
+            h(Btn,{onClick:handleProcess,disabled:status==='loading'||!transcript.trim()},status==='loading'?'Processing...':'Generate Summary →')
           )
         ),
         status==='error'&&h('div',{style:{marginTop:14,padding:14,background:C.danger+'15',border:'1px solid '+C.danger+'44',borderRadius:8,color:C.danger,fontSize:13}},errorMsg)
       ),
 
-      // RESULT
+      // ── RESULT ─────────────────────────────────────────────────────────────
       view==='result'&&result&&h('div',{ref:resultRef},
         h('div',{style:{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:22,flexWrap:'wrap',gap:12}},
           h('div',null,
@@ -781,198 +799,207 @@ function App(){
             ),
             h('div',{style:{display:'flex',gap:12,color:C.muted,fontSize:12,flexWrap:'wrap'}},
               h('span',null,result.meetingDate),
-              result.hostedBy&&h('span',null,'· Hosted by '+result.hostedBy),
-              result.attendees&&h('span',null,'· Attended by '+result.attendees)
+              result.attendees&&h('span',null,'Attended by: '+result.attendees)
             )
           ),
           h('div',{style:{display:'flex',gap:8}},
-            h(Btn,{small:true,variant:'ghost',onClick:()=>persistView('input')},'← New Meeting'),
-            h(CopyBtn,{getText:()=>formatForCopy(result,result.clientName)})
+            h(Btn,{small:true,variant:'ghost',onClick:function(){nav('new-meeting');}},  '← New Meeting'),
+            h(CopyBtn,{getText:function(){return formatForCopy(result,result.clientName);}})
           )
         ),
         h('div',{style:{background:C.card,borderRadius:10,padding:18,marginBottom:22,border:'1px solid '+C.border}},
           h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.1em',marginBottom:8}},'OVERVIEW'),
           h('p',{style:{color:C.text,fontSize:14,lineHeight:1.75}},result.summary)
         ),
-        result.flags?.length>0&&h('div',{style:{background:C.warn+'10',border:'1px solid '+C.warn+'44',borderRadius:10,padding:16,marginBottom:22}},
+        result.flags&&result.flags.length>0&&h('div',{style:{background:C.warn+'10',border:'1px solid '+C.warn+'44',borderRadius:10,padding:16,marginBottom:22}},
           h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:10}},
-            
             h('span',{style:{color:C.warn,fontSize:11,fontWeight:700,letterSpacing:'0.1em'}},'FLAGS & WATCH ITEMS')
           ),
-          result.flags.map((f,i)=>h('div',{key:i,style:{color:C.text,fontSize:13,lineHeight:1.6,padding:'5px 0',borderBottom:i<result.flags.length-1?'1px solid '+C.warn+'22':'none'}},'• '+f))
+          result.flags.map(function(f,i){return h('div',{key:i,style:{color:C.text,fontSize:13,lineHeight:1.6,padding:'5px 0',borderBottom:i<result.flags.length-1?'1px solid '+C.warn+'22':'none'}},'• '+f);})
         ),
-        h(Section,{icon:'',title:'Notes & Questions',items:result.notesAndQuestions}),
-        h(Section,{icon:'',title:'Client Next Steps',items:result.clientNextSteps,accent:C.success,checkable:true,checked:checkedC,onCheck:i=>setCheckedC(p=>p.includes(i)?p.filter(x=>x!==i):[...p,i])}),
-        h(Section,{icon:'',title:'MTS Tasks',items:result.mtsTasks,checkable:true,checked:checkedM,onCheck:i=>setCheckedM(p=>p.includes(i)?p.filter(x=>x!==i):[...p,i])}),
-        h(Section,{icon:'',title:'Suggested Next Agenda',items:result.nextAgenda,accent:'#7B9FD4'}),
-        result.ghostItems?.length>0&&h(Section,{icon:'',title:'Carried Forward',items:result.ghostItems,accent:C.muted}),
+        h(Section,{title:'Notes & Questions',items:result.notesAndQuestions}),
+        h(Section,{title:'Client Next Steps',items:result.clientNextSteps,accent:C.success,checkable:true,checked:checkedC,onCheck:function(i){setCheckedC(function(p){return p.indexOf(i)>=0?p.filter(function(x){return x!==i;}):[...p,i];});}}),
+        h(Section,{title:'MTS Tasks',items:result.mtsTasks,checkable:true,checked:checkedM,onCheck:function(i){setCheckedM(function(p){return p.indexOf(i)>=0?p.filter(function(x){return x!==i;}):[...p,i];});}}),
+        h(Section,{title:'Suggested Next Agenda',items:result.nextAgenda,accent:C.blue}),
+        result.ghostItems&&result.ghostItems.length>0&&h(Section,{title:'Carried Forward',items:result.ghostItems,accent:C.muted}),
         h(EmailBlock,{email:result.followUpEmail}),
         h('div',{style:{padding:'12px 16px',background:C.success+'10',border:'1px solid '+C.success+'33',borderRadius:8,fontSize:12,color:C.success}},
-          'Saved to ',h('strong',null,result.clientName),"'s profile — client data and history updated automatically.")
+          'Saved to ',h('strong',null,result.clientName),"'s profile.")
       ),
 
-      // AGENDA
+      // ── AGENDA ─────────────────────────────────────────────────────────────
       view==='agenda'&&h('div',null,
         h('div',{style:{marginBottom:20}},
           h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'Agenda Builder'),
           h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.6}},'Enter a client name and the agent builds a meeting agenda from their history and open items.')
         ),
         h('div',{style:{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}},
-          h('input',{value:agendaClient,onChange:e=>setAgendaClient(e.target.value),onKeyDown:e=>e.key==='Enter'&&handleBuildAgenda(),
-            placeholder:'Client name (e.g. Jakob Lively Lighting)',
+          h('input',{value:agendaClient,onChange:function(e){setAgendaClient(e.target.value);},onKeyDown:function(e){if(e.key==='Enter')handleBuildAgenda();},
+            placeholder:'Client name',
             style:{flex:1,minWidth:200,background:C.card,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit'}}),
           h(Btn,{onClick:handleBuildAgenda,disabled:agendaLoading||!agendaClient.trim()},agendaLoading?'Building...':'Build Agenda →')
         ),
         clients.length>0&&h('div',{style:{marginBottom:20}},
           h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.08em',marginBottom:8}},'KNOWN CLIENTS'),
           h('div',{style:{display:'flex',flexWrap:'wrap',gap:6}},
-            clients.map(n=>h('button',{key:n,onClick:()=>setAgendaClient(n.replace(/\b\w/g,c=>c.toUpperCase())),
-              style:{background:agendaClient.toLowerCase()===n?C.accent:C.card,color:agendaClient.toLowerCase()===n?C.bg:C.muted,
-                border:'1px solid '+C.border,borderRadius:20,padding:'4px 12px',fontSize:12,cursor:'pointer',fontWeight:500,textTransform:'capitalize',fontFamily:'inherit'}},n))
+            clients.map(function(n){
+              return h('button',{key:n,onClick:function(){setAgendaClient(n);},
+                style:{background:agendaClient===n?C.accent:C.card,color:agendaClient===n?C.bg:C.muted,border:'1px solid '+C.border,borderRadius:20,padding:'4px 12px',fontSize:12,cursor:'pointer',fontWeight:500,fontFamily:'inherit'}},n);
+            })
           )
         ),
         agendaResult&&h('div',{style:{background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:20}},
           h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}},
-            h('div',{style:{display:'flex',alignItems:'center',gap:8}},
-              
-              h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:13,color:C.accent,fontWeight:600,letterSpacing:'0.08em',textTransform:'uppercase'}},'Agenda — '+agendaClient)
-            ),
-            h(CopyBtn,{getText:()=>agendaResult,label:'Copy Agenda'})
+            h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:13,color:C.accent,fontWeight:600,letterSpacing:'0.08em',textTransform:'uppercase'}},'Agenda — '+agendaClient),
+            h(CopyBtn,{getText:function(){return agendaResult;},label:'Copy Agenda'})
           ),
           h('pre',{style:{color:C.text,fontSize:13,lineHeight:1.8,whiteSpace:'pre-wrap',fontFamily:'inherit'}},agendaResult)
         )
       ),
 
-      // CLIENTS LIST
-      view==='clients'&&!detailData&&h('div',null,
+      // ── CLIENTS LIST ───────────────────────────────────────────────────────
+      view==='clients'&&!detailClient&&h('div',null,
         h('div',{style:{marginBottom:20}},
-          h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'Client Profiles'),
-          h('p',{style:{color:C.muted,fontSize:13}},'All clients with stored session history and profile data.')
+          h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'All Clients'),
+          h('p',{style:{color:C.muted,fontSize:13}},'Client profiles, session history, and linked businesses.')
         ),
         h('div',{style:{position:'relative',marginBottom:16}},
-          
-          h('input',{value:clientSearch,onChange:e=>setClientSearch(e.target.value),placeholder:'Search clients...',
+          h('input',{value:clientSearch,onChange:function(e){setClientSearch(e.target.value);},placeholder:'Search clients...',
             style:{width:'100%',background:C.card,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit'}}),
-          clientSearch&&h('button',{onClick:()=>setClientSearch(''),
-            style:{position:'absolute',right:10,top:'50%',transform:'translateY(-50%)',background:'none',border:'none',color:C.muted,cursor:'pointer',fontSize:16,fontFamily:'inherit'}},'×')
+          clientSearch&&h('button',{onClick:function(){setClientSearch('');},style:{position:'absolute',right:10,top:'50%',transform:'translateY(-50%)',background:'none',border:'none',color:C.muted,cursor:'pointer',fontSize:16,fontFamily:'inherit'}},'×')
         ),
-        clients.length===0?h('div',{style:{color:C.muted,fontSize:13,padding:32,textAlign:'center',border:'1px dashed '+C.border,borderRadius:10,lineHeight:1.7}},'No clients on record yet.',h('br'),'Process a meeting transcript to get started.')
-        :filteredClients.length===0?h('div',{style:{color:C.muted,fontSize:13,padding:24,textAlign:'center',border:'1px dashed '+C.border,borderRadius:10}},'No clients match "'+clientSearch+'"')
+        filteredClients.length===0?h('div',{style:{color:C.muted,fontSize:13,padding:32,textAlign:'center',border:'1px dashed '+C.border,borderRadius:10,lineHeight:1.7}},
+          clients.length===0?'No clients yet. Process a meeting transcript to get started.':'No clients match "'+clientSearch+'"')
         :h('div',{style:{display:'flex',flexDirection:'column',gap:8}},
-          filteredClients.map(name=>{
-            const data=loadClient(name);
-            const profile=data?.profile||{};
-            const sessionCount=data?.sessions?.length||0;
-            return h('button',{key:name,onClick:()=>handleViewClient(name),
+          filteredClients.map(function(name){
+            return h('button',{key:name,onClick:function(){setDetailClient(name);setDetailClientSS(name);setDetailData(null);nav('clients');},
               style:{background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:'14px 18px',cursor:'pointer',textAlign:'left',display:'flex',alignItems:'center',justifyContent:'space-between',width:'100%',fontFamily:'inherit'}},
               h('div',{style:{display:'flex',alignItems:'center',gap:12}},
                 h('div',{style:{width:38,height:38,borderRadius:'50%',background:C.accent,display:'flex',alignItems:'center',justifyContent:'center',color:C.bg,fontWeight:700,fontSize:15,flexShrink:0}},name.charAt(0).toUpperCase()),
-                h('div',null,
-                  h('div',{style:{color:C.text,fontSize:14,fontWeight:500,textTransform:'capitalize'}},name),
-                  h('div',{style:{color:C.muted,fontSize:11,marginTop:2}},
-                    profile.company&&profile.company!=='Unknown'?profile.company+(profile.industry&&profile.industry!=='Unknown'?' · '+profile.industry:''):sessionCount+' session'+(sessionCount!==1?'s':''))
-                )
+                h('div',null,h('div',{style:{color:C.text,fontSize:14,fontWeight:500}},name))
               ),
-              h('div',{style:{display:'flex',alignItems:'center',gap:8}},
-                sessionCount>0&&h(Tag,{color:C.muted},sessionCount+' session'+(sessionCount!==1?'s':'')),
-                h('span',{style:{color:C.muted,fontSize:12}},'View →')
-              )
+              h('span',{style:{color:C.muted,fontSize:12}},'View →')
             );
           })
         )
       ),
 
-      // CLIENT DETAIL
-      view==='clients'&&detailData&&h('div',null,
+      // ── CLIENT DETAIL ──────────────────────────────────────────────────────
+      view==='clients'&&detailClient&&h('div',null,
+        // Header
         h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:22,flexWrap:'wrap',gap:10}},
           h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
-            h(Btn,{small:true,variant:'ghost',onClick:()=>{setDetailData(null);setDetailClient(null);}},'← Back'),
+            h(Btn,{small:true,variant:'ghost',onClick:function(){setDetailClient('');setDetailClientSS('');setDetailData(null);}},'← Back'),
             editingName
-              ? h('div',{style:{display:'flex',alignItems:'center',gap:8}},
-                  h('input',{value:nameDraft,onChange:e=>setNameDraft(e.target.value),
-                    onKeyDown:e=>{if(e.key==='Enter')handleSaveName();if(e.key==='Escape'){setEditingName(false);setNameDraft(detailClient);}},
+              ?h('div',{style:{display:'flex',alignItems:'center',gap:8}},
+                  h('input',{value:nameDraft,onChange:function(e){setNameDraft(e.target.value);},
+                    onKeyDown:function(e){if(e.key==='Enter')handleSaveName();if(e.key==='Escape'){setEditingName(false);setNameDraft(detailClient);}},
                     autoFocus:true,
                     style:{background:C.surface,border:'1px solid '+C.accent,borderRadius:6,padding:'4px 10px',color:C.text,fontSize:18,fontFamily:"'Playfair Display',serif",fontWeight:700,width:220}}),
                   h(Btn,{small:true,onClick:handleSaveName},'Save'),
-                  h(Btn,{small:true,variant:'ghost',onClick:()=>{setEditingName(false);setNameDraft(detailClient);}},'Cancel')
+                  h(Btn,{small:true,variant:'ghost',onClick:function(){setEditingName(false);setNameDraft(detailClient);}},'Cancel')
                 )
-              : h('div',{style:{display:'flex',alignItems:'center',gap:8}},
-                  h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,textTransform:'capitalize',color:C.text}},detailClient),
-                  h('button',{onClick:()=>{setEditingName(true);setNameDraft(detailClient);},
-                    style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'2px 8px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Rename')
+              :h('div',{style:{display:'flex',alignItems:'center',gap:8}},
+                  h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,color:C.text}},detailClient),
+                  h('button',{onClick:function(){setEditingName(true);setNameDraft(detailClient);},style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'2px 8px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Rename')
                 ),
-            h(Tag,{color:C.muted},(detailData.sessions?.length||0)+' sessions')
+            detailData&&h(Tag,{color:C.muted},(detailData.sessions&&detailData.sessions.length||0)+' sessions')
           ),
-          h(Btn,{small:true,variant:'danger',onClick:()=>handleDeleteClient(detailClient)},'Delete Profile')
+          detailData&&h(Btn,{small:true,variant:'danger',onClick:handleDeleteClient},'Delete Profile')
         ),
-        // Profile
-        h('div',{style:{background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:18,marginBottom:20}},
-          h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
-            h('div',{style:{display:'flex',alignItems:'center',gap:8}},
-              
-              h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:13,color:C.accent,fontWeight:600,letterSpacing:'0.08em',textTransform:'uppercase'}},'Client Profile')
-            ),
-            h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
-              generatingProfile&&h('span',{style:{color:C.muted,fontSize:11,fontStyle:'italic'}},'Generating...'),
-              !generatingProfile&&(editingProfile
-                ? h('div',{style:{display:'flex',gap:8}},
-                    h(Btn,{small:true,variant:'ghost',onClick:function(){setEditingProfile(false);setProfileDraft(detailData.profile||{});}},'Cancel'),
-                    h(Btn,{small:true,onClick:handleSaveProfile},'Save Profile')
-                  )
-                : h('div',{style:{display:'flex',gap:6}},
-                    h(Btn,{small:true,variant:'ghost',onClick:function(){setEditingProfile(true);}},'Edit'),
-                    h('button',{
-                      onClick:function(){
-                        setGeneratingProfile(true);
-                        generateClientProfile(detailClient,detailData,apiKey).then(function(generated){
-                          if(!generated) return;
-                          var merged=Object.assign({},detailData.profile||{});
-                          Object.entries(generated).forEach(function(entry){
-                            merged[entry[0]]=entry[1];
-                          });
-                          // Always set lastMeetingDate from most recent session
-                          var ss=detailData.sessions||[];
-                          if(ss.length) merged.lastMeetingDate=ss[ss.length-1].date||'';
-                          var updated=Object.assign({},detailData,{profile:merged});
-                          saveClient(detailClient,updated);
-                          persistDetail(detailClient,updated);
-                          setProfileDraft(merged);
-                        }).catch(function(e){console.error(e);}).finally(function(){setGeneratingProfile(false);});
-                      },
-                      style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'3px 10px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}
-                    },'Refresh')
-                  )
+        detailLoading?h('div',{style:{color:C.muted,fontSize:13,padding:20}},'Loading...')
+        :detailData&&h('div',null,
+          // Profile card
+          h('div',{style:{background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:18,marginBottom:20}},
+            h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
+              h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:13,color:C.accent,fontWeight:600,letterSpacing:'0.08em',textTransform:'uppercase'}},'Client Profile'),
+              h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+                generatingProfile&&h('span',{style:{color:C.muted,fontSize:11,fontStyle:'italic'}},'Generating...'),
+                !generatingProfile&&(editingProfile
+                  ?h('div',{style:{display:'flex',gap:8}},
+                      h(Btn,{small:true,variant:'ghost',onClick:function(){setEditingProfile(false);setProfileDraft(detailData.profile||{});}},'Cancel'),
+                      h(Btn,{small:true,onClick:handleSaveProfile},'Save Profile')
+                    )
+                  :h('div',{style:{display:'flex',gap:6}},
+                      h(Btn,{small:true,variant:'ghost',onClick:function(){setEditingProfile(true);}},'Edit'),
+                      h('button',{onClick:handleRefreshProfile,style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'3px 10px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Refresh')
+                    )
+                )
               )
-            )
+            ),
+            h(ProfileCard,{profile:editingProfile?profileDraft:(detailData.profile||{}),editing:editingProfile,onChange:function(k,v){setProfileDraft(function(p){var n=Object.assign({},p);n[k]=v;return n;});}}),
+            editingProfile&&h(BusinessesInput,{value:profileDraft.businesses||[],onChange:function(v){setProfileDraft(function(p){return Object.assign({},p,{businesses:v});});}})
           ),
-          h(ProfileCard,{profile:editingProfile?profileDraft:(detailData.profile||{}),editing:editingProfile,onChange:(k,v)=>setProfileDraft(p=>({...p,[k]:v}))})
-        ),
-        // Open items
-        detailData.openItems?.length>0&&h('div',{style:{background:C.warn+'10',border:'1px solid '+C.warn+'33',borderRadius:10,padding:16,marginBottom:20}},
-          h('div',{style:{color:C.warn,fontSize:11,fontWeight:700,letterSpacing:'0.08em',marginBottom:10}},'OPEN ITEMS CARRIED FORWARD'),
-          detailData.openItems.map((item,i)=>h('div',{key:i,style:{color:C.text,fontSize:13,padding:'5px 0',borderBottom:i<detailData.openItems.length-1?'1px solid '+C.warn+'22':'none',lineHeight:1.5}},'• '+item))
-        ),
-        // Sessions
-        h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
-          h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.08em'}},'SESSION HISTORY'),
-          h('div',{style:{color:C.muted,fontSize:11}},'Click a session to expand/collapse')
-        ),
-        (detailData.sessions||[]).slice().reverse().map(function(s,i,arr){
-            var realIndex = (detailData.sessions.length-1)-i;
+
+          // Open items
+          detailData.openItems&&detailData.openItems.length>0&&h('div',{style:{background:C.warn+'10',border:'1px solid '+C.warn+'33',borderRadius:10,padding:16,marginBottom:20}},
+            h('div',{style:{color:C.warn,fontSize:11,fontWeight:700,letterSpacing:'0.08em',marginBottom:10}},'OPEN ITEMS CARRIED FORWARD'),
+            detailData.openItems.map(function(item,i){return h('div',{key:i,style:{color:C.text,fontSize:13,padding:'5px 0',borderBottom:i<detailData.openItems.length-1?'1px solid '+C.warn+'22':'none',lineHeight:1.5}},'• '+item);})
+          ),
+
+          // Businesses section
+          h('div',{style:{marginBottom:24}},
+            h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
+              h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.08em'}},'BUSINESSES & ENTITIES'),
+              h('button',{onClick:function(){setAddingBiz(function(v){return !v;});setNewBiz({name:''});},style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'3px 10px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},addingBiz?'Cancel':'+ Add Business')
+            ),
+            addingBiz&&h('div',{style:{background:C.card,border:'1px solid '+C.accent,borderRadius:10,padding:16,marginBottom:10}},
+              h('div',{style:{color:C.accent,fontSize:12,fontWeight:700,marginBottom:12}},'NEW BUSINESS'),
+              h('input',{value:newBiz.name,onChange:function(e){setNewBiz(function(p){return Object.assign({},p,{name:e.target.value});});},placeholder:'Business name (required)',autoFocus:true,
+                style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'8px 10px',color:C.text,fontSize:13,fontFamily:'inherit',marginBottom:10}}),
+              h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:12}},
+                BIZ_FIELDS.slice(0,4).map(function(f){
+                  return h('div',{key:f.key},
+                    h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.06em',marginBottom:3}},f.label.toUpperCase()),
+                    h('input',{value:newBiz[f.key]||'',onChange:function(e){setNewBiz(function(p){var n=Object.assign({},p);n[f.key]=e.target.value;return n;});},placeholder:f.placeholder,
+                      style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'6px 8px',color:C.text,fontSize:12,fontFamily:'inherit'}})
+                  );
+                })
+              ),
+              h(Btn,{onClick:handleAddBiz,disabled:!newBiz.name.trim()},'Add Business')
+            ),
+            detailBizzes.length===0&&!addingBiz?h('div',{style:{color:C.muted,fontSize:13,fontStyle:'italic',padding:'8px 0'}},'No businesses linked yet.')
+            :detailBizzes.map(function(biz){
+              return h(BusinessCard,{key:biz.id,biz:biz,
+                onSave:handleSaveBiz,
+                onDelete:function(){if(confirm('Delete '+biz.name+'?'))handleDeleteBiz(biz.id);}
+              });
+            })
+          ),
+
+          // Sessions
+          h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
+            h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.08em'}},'SESSION HISTORY'),
+            h('div',{style:{color:C.muted,fontSize:11}},'Click to expand/collapse')
+          ),
+          (detailData.sessions||[]).slice().reverse().map(function(s,i,arr){
+            var realIndex=(detailData.sessions.length-1)-i;
             return h(SessionCard,{key:i,session:s,index:i,total:arr.length,clientName:detailClient,
-              onSave:function(updated){
-                var sessions=detailData.sessions.slice();
-                sessions[realIndex]=updated;
-                var newData=Object.assign({},detailData,{sessions:sessions});
-                if(sbKey){ sbSaveSession(detailClient, updated, sbKey).catch(function(e){console.error('sbSessionEdit',e);}); }
-                saveClient(detailClient,newData);
-                setDetailData(newData);
-              }
+              onSave:function(updated){handleSaveSession(updated,realIndex);},
+              onDelete:function(){handleDeleteSession(s,realIndex);}
             });
           })
+        )
       )
     )
   );
+
+  async function handleBuildAgenda(){
+    if(!agendaClient.trim()) return;
+    setAgendaLoading(true);setAgendaResult('');
+    try{
+      var cls=await sbGet('clients',{name:'eq.'+agendaClient,limit:'1'},sbKey);
+      var history=null;
+      if(cls&&cls.length){
+        var cl=cls[0];
+        var sess=await sbGet('sessions',{client_id:'eq.'+cl.id,order:'created_at.desc',limit:'3'},sbKey);
+        var gh=await sbGet('ghost_items',{client_id:'eq.'+cl.id,resolved:'eq.false',limit:'10'},sbKey);
+        history={profile:cl.profile||{},sessions:(sess||[]).map(function(s){return {date:s.meeting_date,summary:s.summary,nextAgenda:s.next_agenda};}),openItems:(gh||[]).map(function(g){return g.summary;})};
+      }
+      setAgendaResult(await runAgenda(agendaClient,history,apiKey));
+    }catch(e){setAgendaResult('Error: '+e.message);}
+    setAgendaLoading(false);
+  }
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(h(App,null));

@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>MTS Meeting Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#0F0F0F;color:#E8E4DC;font-family:'DM Sans','Helvetica Neue',sans-serif}
+textarea,input{resize:vertical}
+textarea:focus,input:focus,button:focus{outline:none}
+button{transition:opacity .15s;font-family:inherit}
+button:hover:not(:disabled){opacity:.8}
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-track{background:#0F0F0F}
+::-webkit-scrollbar-thumb{background:#2A2A2A;border-radius:3px}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}
+.modal{background:#1E1E1E;border:1px solid #2A2A2A;border-radius:14px;padding:32px;max-width:480px;width:100%}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+<script>
+const {useState,useRef,useEffect} = React;
+const h = React.createElement;
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const C = {
+  bg:'#0F0F0F',surface:'#171717',card:'#1E1E1E',border:'#2A2A2A',
+  accent:'#C8A96E',accentDim:'#8B6F3E',text:'#E8E4DC',muted:'#6B6560',
+  success:'#4CAF82',warn:'#E8834A',danger:'#E05252'
+};
+const SITE_PASSWORD = 'mts2025';
+const MTS_PROMPT = `You are a meeting summary assistant for Momen Tax Services (MTS). Your job is to read a meeting transcript and/or agenda and produce a formatted meeting summary.
+
+ROLE & CONTEXT
+- All meetings are hosted by Jasmine Hajimomen (founder)
+- Kevina: client onboarding specialist; sends engagement letters and follow-up emails
+- Emely: client communications and implementation
+- Danny: accounting and payroll setup
+- Atenas: internal operations; check with her on payroll backdating questions
+- Tools used: Canopy (CRM), QuickBooks, ADP (payroll), GoHighLevel, Notion
+
+SUMMARY STRUCTURE — produce sections in this exact order:
+1. Notes/Questions — Direct answers to agenda questions only. Never restate the question. Lead with the answer. If a question was not addressed, write "Not discussed — to be addressed at next meeting."
+2. Client Next Steps — Action items for the client only. Concise bullets.
+3. MTS Tasks — Internal action items. Include specific backdating strategies, billing items, payroll actions, and follow-up deliverables.
+4. Suggested Next Meeting Agenda — Max 5 bullets. Forward-looking only, not a recap.
+5. Follow-Up Email — Written and ready to send.
+
+EMAIL RULES
+- Open: "Hi [Name], Thank you for your time in meeting with Jasmine yesterday."
+- Short 1-2 sentence purpose paragraph
+- MTS action paragraph
+- Client action list (bullets for <5 items, numbered for 5+)
+- Final line: "As always, please don't hesitate to reach out — we are always an email or phone call away."
+- Sign off: Warm regards / [First Last] / [Title] / Momen Tax Services
+- No em dashes — use commas instead
+
+EMAIL TONE BY CLIENT TYPE
+- Lauryn-style: Include a Jasmine update paragraph if there is a specific blocker
+- Sarah-style: Reference sharing the P&L / QuickBooks access; keep it short
+- Brandon-style: Use numbered list; include franchise tax payment permission confirmation
+- Hank-style: Reference specific account used for payment; note W4s uploaded; e-signature request and engagement letter + invoice link as separate items
+
+OUTPUT: Respond ONLY with valid JSON, no markdown fences:
+{
+  "clientName": "string",
+  "meetingDate": "string",
+  "meetingType": "string",
+  "hostedBy": "Momen Tax Services",
+  "summary": "2-3 sentence plain English overview",
+  "notesAndQuestions": ["string"],
+  "clientNextSteps": ["string"],
+  "mtsTasks": ["string"],
+  "nextAgenda": ["string"],
+  "followUpEmail": { "subject": "string", "body": "string" },
+  "flags": ["string"],
+  "ghostItems": ["string"],
+  "clientProfile": {
+    "phone": "string or Unknown",
+    "email": "string or Unknown",
+    "businesses": ["string"],
+    "industry": "string or Unknown",
+    "filingStatus": "string or Unknown",
+    "spouse": "string or Unknown",
+    "serviceType": "string or Unknown (e.g. Tax Prep, TAS, CAS, Bookkeeping)",
+    "lastMeetingDate": "string or Unknown",
+    "notes": "2-3 sentence client overview — plain text only, no bold, no labels, just start directly with the client's name"
+  }
+}`;
+
+// ── Storage ───────────────────────────────────────────────────────────────────
+const toKey = n => 'mts_client_' + n.toLowerCase().replace(/\s+/g,'_');
+const getApiKey = () => localStorage.getItem('mts_anthropic_key')||'';
+const saveApiKey = k => localStorage.setItem('mts_anthropic_key',k);
+const loadClient = n => { try { const r=localStorage.getItem(toKey(n)); return r?JSON.parse(r):null; } catch{return null;} };
+const saveClient = (n,d) => { try { if(JSON.stringify(d).length>4000000) d.sessions=d.sessions.slice(-10); localStorage.setItem(toKey(n),JSON.stringify(d)); } catch(e){console.error(e);} };
+const listClients = () => { try { return Object.keys(localStorage).filter(k=>k.startsWith('mts_client_')).map(k=>k.replace('mts_client_','').replace(/_/g,' ')); } catch{return[];} };
+const deleteClient = n => { try{localStorage.removeItem(toKey(n));}catch(e){console.error(e);} };
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function runAgent(transcript, history, apiKey) {
+  const histCtx = history?.sessions?.length
+    ? '\n\nCLIENT HISTORY (last 3 sessions):\n'+JSON.stringify(history.sessions.slice(-3),null,2)+'\nExisting profile: '+JSON.stringify(history.profile||{})+'\nCarried open items: '+JSON.stringify(history.openItems||[])
+    : '';
+  const res = await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:4000,system:MTS_PROMPT,
+      messages:[{role:'user',content:'Process this transcript and return ONLY the JSON.'+histCtx+'\n\nTRANSCRIPT:\n'+transcript.slice(0,12000)}]})
+  });
+  const data = await res.json();
+  if(data.error) throw new Error(data.error.message);
+  return JSON.parse(data.content[0].text.replace(/```json|```/g,'').trim());
+}
+
+async function runAgenda(clientName, history, apiKey) {
+  const histCtx = history?.sessions?.length
+    ? 'Last '+history.sessions.length+' session(s).\nMost recent: '+history.sessions.slice(-1)[0]?.summary+'\nOpen items: '+JSON.stringify(history.openItems||[])+'\nLast suggested agenda: '+JSON.stringify(history.sessions.slice(-1)[0]?.nextAgenda||[])
+    : 'No prior sessions on record.';
+  const res = await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:800,system:MTS_PROMPT,
+      messages:[{role:'user',content:'Build a pre-meeting agenda for client: '+clientName+'\n\nCLIENT HISTORY:\n'+histCtx+'\n\nReturn a clean numbered agenda (max 6 items) as plain text only.'}]})
+  });
+  const data = await res.json();
+  if(data.error) throw new Error(data.error.message);
+  return data.content[0].text;
+}
+
+// ── Generate client summary ──────────────────────────────────────────────────
+// ── Generate client profile from session history ─────────────────────────────
+async function generateClientProfile(clientName, data, apiKey) {
+  var sessions = data.sessions || [];
+  if (!sessions.length) return null;
+  var ctx = sessions.map(function(s,i){
+    return 'Session '+(i+1)+' ('+s.date+', '+s.meetingType+'): '+(s.summary||'')+
+      '\nMTS Tasks: '+((s.mtsTasks||[]).join('; '))+
+      '\nClient Steps: '+((s.clientNextSteps||[]).join('; '));
+  }).join('\n\n');
+
+  var lastDate = sessions.length ? sessions[sessions.length-1].date || '' : '';
+  var prompt = 'You are a tax advisory assistant for Momen Tax Services. Based on the session history below for client "'+clientName+'", extract the following and respond ONLY with valid JSON, no markdown fences:\n{\n  "notes": "2-3 sentence plain text overview starting with the client name, no labels or bold",\n  "phone": "phone number or Unknown",\n  "email": "email or Unknown",\n  "businesses": ["list of business names"],\n  "industry": "industry or Unknown",\n  "filingStatus": "tax filing status e.g. Single, MFJ, S-Corp, Partnership or Unknown",\n  "spouse": "spouse name or Unknown",\n  "serviceType": "e.g. TAS, CAS, Tax Prep, Bookkeeping or Unknown"\n}\n\nSESSION HISTORY:\n'+ctx;
+
+  var res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body: JSON.stringify({model:'claude-sonnet-4-6', max_tokens:600,
+      messages:[{role:'user', content:prompt}]})
+  });
+  var d = await res.json();
+  if(d.error) throw new Error(d.error.message);
+  var text = d.content[0].text.replace(/```json|```/g,'').trim();
+  return JSON.parse(text);
+}
+
+// ── Format for copy ───────────────────────────────────────────────────────────
+function formatForCopy(r, clientName) {
+  const lines = [];
+  lines.push('MEETING SUMMARY — '+(r.meetingType||'Advisory Meeting'));
+  lines.push('Client: '+(clientName||r.clientName||''));
+  lines.push('Date: '+(r.meetingDate||''));
+  lines.push('Hosted By: '+(r.hostedBy||'Momen Tax Services'));
+  lines.push('');
+  if(r.notesAndQuestions?.length){lines.push('NOTES / QUESTIONS');r.notesAndQuestions.forEach(i=>lines.push('• '+i));lines.push('');}
+  if(r.clientNextSteps?.length){lines.push('CLIENT NEXT STEPS');r.clientNextSteps.forEach(i=>lines.push('• '+i));lines.push('');}
+  if(r.mtsTasks?.length){lines.push('MTS TASKS');r.mtsTasks.forEach(i=>lines.push('• '+i));lines.push('');}
+  if(r.nextAgenda?.length){lines.push('SUGGESTED NEXT MEETING AGENDA');r.nextAgenda.forEach(i=>lines.push('• '+i));lines.push('');}
+  if(r.flags?.length){lines.push('FLAGS & WATCH ITEMS');r.flags.forEach(i=>lines.push('• '+i));lines.push('');}
+  if(r.followUpEmail){lines.push('FOLLOW-UP EMAIL');lines.push('Subject: '+r.followUpEmail.subject);lines.push('');lines.push(r.followUpEmail.body||'');}
+  return lines.join('\n');
+}
+
+// ── UI Components ─────────────────────────────────────────────────────────────
+function Tag({color,children}){
+  return h('span',{style:{background:color+'22',color,border:'1px solid '+color+'44',borderRadius:4,padding:'2px 8px',fontSize:11,fontWeight:600,letterSpacing:'0.05em',textTransform:'uppercase'}},children);
+}
+
+function Btn({onClick,disabled,variant='primary',small,children,style:s={}}){
+  const base={border:'none',borderRadius:6,cursor:disabled?'not-allowed':'pointer',fontWeight:600,fontFamily:'inherit',...s};
+  const v={
+    primary:{background:disabled?C.accentDim:C.accent,color:C.bg,padding:small?'5px 14px':'10px 28px',fontSize:small?12:13},
+    ghost:{background:'transparent',color:C.muted,border:'1px solid '+C.border,padding:small?'4px 12px':'6px 16px',fontSize:small?11:12},
+    danger:{background:C.danger+'18',color:C.danger,border:'1px solid '+C.danger+'44',padding:'4px 12px',fontSize:11},
+  };
+  return h('button',{onClick,disabled,style:{...base,...v[variant]}},children);
+}
+
+function CopyBtn({getText,label='Copy All'}){
+  const [copied,setCopied]=useState(false);
+  return h('button',{
+    onClick:()=>{navigator.clipboard.writeText(getText());setCopied(true);setTimeout(()=>setCopied(false),2000);},
+    style:{background:copied?C.success+'22':C.accentDim,color:copied?C.success:'#fff',border:copied?'1px solid '+C.success+'44':'none',borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}
+  },copied?'Copied!':label);
+}
+
+function Section({icon,title,items,accent,checkable,checked=[],onCheck}){
+  if(!items?.length) return null;
+  return h('div',{style:{marginBottom:22}},
+    h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:10}},
+      h('span',null,icon),
+      h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:12,color:accent||C.accent,fontWeight:600,letterSpacing:'0.1em',textTransform:'uppercase'}},title)
+    ),
+    h('div',{style:{display:'flex',flexDirection:'column',gap:5}},
+      items.map((item,i)=>h('div',{key:i,onClick:checkable?()=>onCheck(i):undefined,
+        style:{display:'flex',gap:10,padding:'8px 12px',background:C.surface,borderRadius:6,
+          borderLeft:'2px solid '+(accent||C.accent)+'44',cursor:checkable?'pointer':'default',
+          opacity:checked.includes(i)?0.38:1,textDecoration:checked.includes(i)?'line-through':'none'}},
+        h('span',{style:{color:accent||C.accentDim,fontSize:11,marginTop:2,flexShrink:0}},String(i+1).padStart(2,'0')),
+        h('span',{style:{color:C.text,fontSize:13,lineHeight:1.6}},item)
+      ))
+    ),
+    checkable&&h('div',{style:{color:C.muted,fontSize:11,marginTop:5}},'Click to mark complete')
+  );
+}
+
+function EmailBlock({email}){
+  const [copied,setCopied]=useState(false);
+  if(!email) return null;
+  const full='Subject: '+email.subject+'\n\n'+email.body;
+  return h('div',{style:{marginBottom:22}},
+    h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}},
+      h('div',{style:{display:'flex',alignItems:'center',gap:8}},
+        
+        h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:12,color:C.accent,fontWeight:600,letterSpacing:'0.1em',textTransform:'uppercase'}},'Follow-Up Email')
+      ),
+      h('button',{onClick:()=>{navigator.clipboard.writeText(full);setCopied(true);setTimeout(()=>setCopied(false),2000);},
+        style:{background:copied?C.success+'18':C.accentDim,color:copied?C.success:'#fff',border:copied?'1px solid '+C.success+'44':'none',borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}},
+        copied?'Copied':'Copy Email')
+    ),
+    h('div',{style:{background:C.surface,borderRadius:8,padding:18,border:'1px solid '+C.border}},
+      h('div',{style:{color:C.accent,fontSize:11,fontWeight:700,marginBottom:10,letterSpacing:'0.05em'}},'SUBJECT: '+email.subject),
+      h('pre',{style:{color:C.text,fontSize:13,lineHeight:1.75,whiteSpace:'pre-wrap',fontFamily:'inherit'}},email.body)
+    )
+  );
+}
+
+// ── Profile Card ──────────────────────────────────────────────────────────────
+const PROFILE_FIELDS=[
+  {key:'phone',label:'Phone',icon:''},
+  {key:'email',label:'Email',icon:''},
+  {key:'industry',label:'Industry',icon:''},
+  {key:'filingStatus',label:'Tax Filing Status',icon:''},
+  {key:'spouse',label:'Spouse',icon:''},
+  {key:'serviceType',label:'Service Type',icon:''},
+  {key:'lastMeetingDate',label:'Last Meeting Date',icon:''},
+];
+
+function BusinessesInput({value, onChange}) {
+  const [text, setText] = useState((value||[]).join(', '));
+  // Sync if parent value changes (e.g. on load)
+  React.useEffect(() => { setText((value||[]).join(', ')); }, [JSON.stringify(value)]);
+  return h('div', null,
+    h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},'BUSINESSES / ENTITIES'),
+    h('input',{
+      value: text,
+      onChange: e => setText(e.target.value),
+      onBlur: e => onChange(e.target.value.split(',').map(s=>s.trim()).filter(Boolean)),
+      placeholder:'e.g. Athena Holdings, MCI Private Equity (comma separated)',
+      style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit'}
+    }),
+    h('div',{style:{color:C.muted,fontSize:10,marginTop:4}},'Separate multiple businesses with commas')
+  );
+}
+
+function ProfileCard({profile={},editing,onChange}){
+  const val=k=>profile[k]||'Unknown';
+  if(editing){
+    return h('div',{style:{display:'flex',flexDirection:'column',gap:10}},
+      PROFILE_FIELDS.map(f=>h('div',{key:f.key},
+        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},f.label.toUpperCase()),
+        h('input',{value:profile[f.key]||'',onChange:e=>onChange(f.key,e.target.value),
+          placeholder:'Enter '+f.label.toLowerCase()+'...',
+          style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit'}})
+      )),
+      h('div',null,
+        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},'BUSINESSES / ENTITIES'),
+        h(BusinessesInput,{value:(profile.businesses||[]),onChange:v=>onChange('businesses',v)})
+      ),
+      h('div',null,
+        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},'CLIENT NOTES'),
+        h('textarea',{value:profile.notes||'',onChange:e=>onChange('notes',e.target.value),
+          placeholder:'Brief overview of this client...',rows:3,
+          style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit'}})
+      )
+    );
+  }
+  return h('div',null,
+    profile.notes&&h('div',{style:{background:C.surface,borderRadius:8,padding:'12px 14px',marginBottom:14,borderLeft:'3px solid '+C.accent}},
+      h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:6}},'CLIENT OVERVIEW'),
+      h('p',{style:{color:C.text,fontSize:13,lineHeight:1.65,margin:0}},(profile.notes||'').replace(/^\*?\*?Client Summary:?\*?\*?\s*/i,'').replace(/^\*?\*?Summary:?\*?\*?\s*/i,''))
+    ),
+    h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}},
+      PROFILE_FIELDS.map(f=>h('div',{key:f.key,style:{background:C.surface,borderRadius:6,padding:'8px 10px'}},
+        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.06em',marginBottom:3}},f.label.toUpperCase()),
+        h('div',{style:{color:val(f.key)==='Unknown'?C.muted:C.text,fontSize:12,fontStyle:val(f.key)==='Unknown'?'italic':'normal'}},val(f.key))
+      ))
+    ),
+    profile.businesses?.length>0&&h('div',{style:{marginTop:8,background:C.surface,borderRadius:6,padding:'8px 10px'}},
+      h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.06em',marginBottom:4}},'BUSINESSES / ENTITIES'),
+      h('div',{style:{display:'flex',flexWrap:'wrap',gap:6}},
+        profile.businesses.map((b,i)=>h(Tag,{key:i,color:C.accent},b))
+      )
+    )
+  );
+}
+
+// ── Session Card ──────────────────────────────────────────────────────────────
+function EditableList({items,onChange}){
+  return h('div',{style:{display:'flex',flexDirection:'column',gap:4}},
+    (items||[]).map(function(item,i){
+      return h('div',{key:i,style:{display:'flex',gap:6,alignItems:'flex-start'}},
+        h('textarea',{value:item,rows:2,
+          onChange:function(e){var n=items.slice();n[i]=e.target.value;onChange(n);},
+          style:{flex:1,background:C.bg,border:'1px solid '+C.border,borderRadius:4,padding:'5px 8px',color:C.text,fontSize:12,fontFamily:'inherit',resize:'vertical'}}),
+        h('button',{onClick:function(){onChange(items.filter(function(_,j){return j!==i;}));},
+          style:{background:'none',border:'none',color:C.danger,cursor:'pointer',fontSize:16,padding:'4px',flexShrink:0}},'x')
+      );
+    }),
+    h('button',{onClick:function(){onChange((items||[]).concat(['']));},
+      style:{background:'transparent',border:'1px dashed '+C.border,borderRadius:4,padding:'4px 10px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit',textAlign:'left',marginTop:2}},
+      '+ Add item')
+  );
+}
+
+function SessionCard({session:s,index,total,clientName,onSave}){
+  const [open,setOpen]=useState(index===0);
+  const [editing,setEditing]=useState(false);
+  const [draft,setDraft]=useState(null);
+
+  function startEdit(){setDraft(JSON.parse(JSON.stringify(s)));setEditing(true);setOpen(true);}
+  function cancelEdit(){setEditing(false);setDraft(null);}
+  function saveEdit(){onSave(draft);setEditing(false);setDraft(null);}
+  function upd(key,val){setDraft(function(p){var n=Object.assign({},p);n[key]=val;return n;});}
+  function updEmail(key,val){setDraft(function(p){var n=Object.assign({},p);n.followUpEmail=Object.assign({},p.followUpEmail||{});n.followUpEmail[key]=val;return n;});}
+
+  var cur=editing?draft:s;
+
+  return h('div',{style:{background:C.card,border:'1px solid '+(editing?C.accent:C.border),borderRadius:10,marginBottom:10,overflow:'hidden'}},
+    h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'14px 18px',userSelect:'none'}},
+      h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',flex:1,cursor:editing?'default':'pointer'},
+        onClick:function(){if(!editing)setOpen(function(o){return !o;});}},
+        editing
+          ? h('div',{style:{display:'flex',gap:8,flexWrap:'wrap'}},
+              h('input',{value:draft.date||'',onChange:function(e){upd('date',e.target.value);},
+                onClick:function(e){e.stopPropagation();},placeholder:'Date',
+                style:{background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'3px 8px',color:C.accent,fontSize:13,fontWeight:600,fontFamily:'inherit',width:160}}),
+              h('input',{value:draft.meetingType||'',onChange:function(e){upd('meetingType',e.target.value);},
+                onClick:function(e){e.stopPropagation();},placeholder:'Meeting type',
+                style:{background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'3px 8px',color:C.text,fontSize:12,fontFamily:'inherit',width:160}})
+            )
+          : h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
+              h('span',{style:{color:C.accent,fontSize:13,fontWeight:600}},s.date),
+              s.meetingType&&h(Tag,{color:C.accent},s.meetingType),
+              s.flags&&s.flags.length>0&&h(Tag,{color:C.warn},s.flags.length+' flag'+(s.flags.length>1?'s':''))
+            )
+      ),
+      h('div',{style:{display:'flex',alignItems:'center',gap:8,flexShrink:0}},
+        !editing&&h(Tag,{color:C.muted},'Session '+(total-index)),
+        !editing&&h(CopyBtn,{getText:function(){return formatForCopy(s,clientName);},label:'Copy'}),
+        editing
+          ? h('div',{style:{display:'flex',gap:6}},
+              h('button',{onClick:saveEdit,style:{background:C.accent,color:C.bg,border:'none',borderRadius:4,padding:'4px 12px',fontSize:11,fontWeight:700,cursor:'pointer',fontFamily:'inherit'}},'Save'),
+              h('button',{onClick:cancelEdit,style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'4px 10px',fontSize:11,color:C.muted,cursor:'pointer',fontFamily:'inherit'}},'Cancel')
+            )
+          : h('button',{onClick:function(e){e.stopPropagation();startEdit();},
+              style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'3px 10px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Edit'),
+        !editing&&h('span',{onClick:function(){setOpen(function(o){return !o;});},style:{color:C.muted,fontSize:14,marginLeft:4,cursor:'pointer'}},open?'▲':'▼')
+      )
+    ),
+    !open&&!editing&&h('div',{style:{padding:'0 18px 14px',color:C.muted,fontSize:12,lineHeight:1.5}},
+      (s.summary||'').slice(0,120)+((s.summary||'').length>120?'...':'')),
+    open&&h('div',{style:{padding:'0 18px 18px',borderTop:'1px solid '+C.border}},
+      h('div',{style:{marginBottom:14,marginTop:14}},
+        h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'SUMMARY'),
+        editing
+          ? h('textarea',{value:draft.summary||'',rows:3,onChange:function(e){upd('summary',e.target.value);},
+              style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'8px 10px',color:C.text,fontSize:13,fontFamily:'inherit',lineHeight:1.6,resize:'vertical'}})
+          : h('p',{style:{color:C.text,fontSize:13,lineHeight:1.65,margin:0}},s.summary)
+      ),
+      (editing||(s.flags&&s.flags.length>0))&&h('div',{style:{marginBottom:12}},
+        h('div',{style:{color:C.warn,fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'FLAGS'),
+        editing?h(EditableList,{items:draft.flags||[],onChange:function(v){upd('flags',v);}})
+          :(s.flags||[]).map(function(f,j){return h('div',{key:j,style:{color:C.text,fontSize:12,padding:'3px 0'}},f);})
+      ),
+      (editing||(s.notesAndQuestions&&s.notesAndQuestions.length>0))&&h('div',{style:{marginBottom:12}},
+        h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'NOTES & QUESTIONS'),
+        editing?h(EditableList,{items:draft.notesAndQuestions||[],onChange:function(v){upd('notesAndQuestions',v);}})
+          :(s.notesAndQuestions||[]).map(function(n,j){return h('div',{key:j,style:{color:C.text,fontSize:12,padding:'3px 0',borderBottom:j<s.notesAndQuestions.length-1?'1px solid '+C.border:'none'}},'- '+n);})
+      ),
+      (editing||(s.clientNextSteps&&s.clientNextSteps.length>0))&&h('div',{style:{marginBottom:12}},
+        h('div',{style:{color:C.success,fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'CLIENT NEXT STEPS'),
+        editing?h(EditableList,{items:draft.clientNextSteps||[],onChange:function(v){upd('clientNextSteps',v);}})
+          :(s.clientNextSteps||[]).map(function(t,j){return h('div',{key:j,style:{color:C.text,fontSize:12,padding:'3px 0'}},t);})
+      ),
+      (editing||(s.mtsTasks&&s.mtsTasks.length>0))&&h('div',{style:{marginBottom:12}},
+        h('div',{style:{color:C.accent,fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'MTS TASKS'),
+        editing?h(EditableList,{items:draft.mtsTasks||[],onChange:function(v){upd('mtsTasks',v);}})
+          :(s.mtsTasks||[]).map(function(t,j){return h('div',{key:j,style:{color:C.text,fontSize:12,padding:'3px 0'}},t);})
+      ),
+      (editing||s.followUpEmail)&&h('div',{style:{marginBottom:12}},
+        h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'FOLLOW-UP EMAIL'),
+        editing
+          ? h('div',null,
+              h('input',{value:(draft.followUpEmail||{}).subject||'',placeholder:'Subject',
+                onChange:function(e){updEmail('subject',e.target.value);},
+                style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'6px 10px',color:C.text,fontSize:12,fontFamily:'inherit',marginBottom:6}}),
+              h('textarea',{value:(draft.followUpEmail||{}).body||'',rows:8,
+                onChange:function(e){updEmail('body',e.target.value);},
+                style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'6px 10px',color:C.text,fontSize:12,fontFamily:'inherit',lineHeight:1.65,resize:'vertical'}})
+            )
+          : s.followUpEmail&&h('div',{style:{background:C.surface,borderRadius:6,padding:'10px 14px',border:'1px solid '+C.border}},
+              h('div',{style:{color:C.accent,fontSize:11,fontWeight:700,marginBottom:6}},'SUBJECT: '+s.followUpEmail.subject),
+              h('pre',{style:{color:C.text,fontSize:12,lineHeight:1.65,whiteSpace:'pre-wrap',fontFamily:'inherit'}},s.followUpEmail.body)
+            )
+      ),
+      (editing||(s.nextAgenda&&s.nextAgenda.length>0))&&h('div',{style:{marginTop:4}},
+        h('div',{style:{color:'#7B9FD4',fontSize:11,fontWeight:700,letterSpacing:'0.06em',marginBottom:6}},'NEXT AGENDA'),
+        editing?h(EditableList,{items:draft.nextAgenda||[],onChange:function(v){upd('nextAgenda',v);}})
+          : h('div',{style:{padding:'8px 12px',background:C.surface,borderRadius:6,fontSize:12,color:C.muted}},
+              h('span',{style:{color:'#7B9FD4',fontWeight:600}},'Next agenda: '),
+              (s.nextAgenda||[]).join(' - ')
+            )
+      )
+    )
+  );
+}
+
+// ── Password Gate ─────────────────────────────────────────────────────────────
+function PasswordGate({onUnlock}){
+  const [val,setVal]=useState('');
+  const [err,setErr]=useState(false);
+  const check=()=>{if(val===SITE_PASSWORD){localStorage.setItem('mts_unlocked','true');onUnlock();}else{setErr(true);setVal('');}};
+  return h('div',{className:'modal-bg'},
+    h('div',{className:'modal'},
+      h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,marginBottom:8,color:C.text}},'MTS Meeting Agent'),
+      h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.65,marginBottom:24}},'Enter the access password to continue.'),
+      h('div',{style:{marginBottom:8,color:C.muted,fontSize:11,fontWeight:600,letterSpacing:'0.08em'}},'PASSWORD'),
+      h('input',{value:val,onChange:e=>{setVal(e.target.value);setErr(false);},onKeyDown:e=>e.key==='Enter'&&check(),
+        placeholder:'Enter password',type:'password',autoFocus:true,
+        style:{width:'100%',background:C.surface,border:'1px solid '+(err?C.danger:C.border),borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit',marginBottom:err?6:16}}),
+      err&&h('div',{style:{color:C.danger,fontSize:12,marginBottom:14}},'Incorrect password. Try again.'),
+      h('button',{onClick:check,disabled:!val,
+        style:{width:'100%',background:val?C.accent:C.accentDim,color:C.bg,border:'none',borderRadius:6,padding:'10px',fontSize:13,fontWeight:700,cursor:val?'pointer':'not-allowed',fontFamily:'inherit'}},
+        'Unlock →')
+    )
+  );
+}
+
+// ── API Key Modal ─────────────────────────────────────────────────────────────
+function ApiKeyModal({onSave}){
+  const [val,setVal]=useState('');
+  return h('div',{className:'modal-bg'},
+    h('div',{className:'modal'},
+      h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,marginBottom:8,color:C.text}},'Welcome to MTS Meeting Agent'),
+      h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.65,marginBottom:24}},"Enter your Anthropic API key. It's saved locally in your browser only."),
+      h('div',{style:{marginBottom:8,color:C.muted,fontSize:11,fontWeight:600,letterSpacing:'0.08em'}},'ANTHROPIC API KEY'),
+      h('input',{value:val,onChange:e=>setVal(e.target.value),onKeyDown:e=>e.key==='Enter'&&val.startsWith('sk-')&&onSave(val),
+        placeholder:'sk-ant-...',type:'password',
+        style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit',marginBottom:16}}),
+      h('p',{style:{color:C.muted,fontSize:11,marginBottom:20,lineHeight:1.6}},
+        'Get your key at ',h('a',{href:'https://console.anthropic.com',target:'_blank',rel:'noreferrer',style:{color:C.accent}},'console.anthropic.com'),' → API Keys'),
+      h('button',{onClick:()=>onSave(val),disabled:!val.startsWith('sk-'),
+        style:{width:'100%',background:val.startsWith('sk-')?C.accent:C.accentDim,color:C.bg,border:'none',borderRadius:6,padding:'10px',fontSize:13,fontWeight:700,cursor:val.startsWith('sk-')?'pointer':'not-allowed',fontFamily:'inherit'}},
+        'Save & Continue →')
+    )
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+function App(){
+  const [unlocked,setUnlocked]=useState(()=>localStorage.getItem('mts_unlocked')==='true');
+  const [apiKey,setApiKey]=useState(()=>getApiKey());
+  const [view,setView]=useState(()=>sessionStorage.getItem('mts_view')||'input');
+  const [transcript,setTranscript]=useState('');
+  const [result,setResult]=useState(null);
+  const [status,setStatus]=useState('idle');
+  const [errorMsg,setErrorMsg]=useState('');
+  const [clients,setClients]=useState(()=>listClients());
+  const [detailClient,setDetailClient]=useState(()=>sessionStorage.getItem('mts_detail_client')||null);
+  const [detailData,setDetailData]=useState(()=>{
+    var n=sessionStorage.getItem('mts_detail_client');
+    return n?loadClient(n):null;
+  });
+  const [editingProfile,setEditingProfile]=useState(false);
+  const [generatingProfile,setGeneratingProfile]=useState(false);
+  const [editingName,setEditingName]=useState(false);
+  const [nameDraft,setNameDraft]=useState('');
+  const [profileDraft,setProfileDraft]=useState({});
+  const [clientSearch,setClientSearch]=useState(()=>sessionStorage.getItem('mts_search')||'');
+  const [checkedC,setCheckedC]=useState([]);
+  const [checkedM,setCheckedM]=useState([]);
+  const [agendaClient,setAgendaClient]=useState('');
+  const [agendaResult,setAgendaResult]=useState('');
+  const [agendaLoading,setAgendaLoading]=useState(false);
+  const resultRef=useRef(null);
+
+  const refreshClients=()=>setClients(listClients());
+  function persistView(v){sessionStorage.setItem('mts_view',v);setView(v);}
+  function persistDetail(name,data){
+    if(name){sessionStorage.setItem('mts_detail_client',name);}
+    else{sessionStorage.removeItem('mts_detail_client');}
+    setDetailClient(name);setDetailData(data);
+  }
+  const filteredClients=clients.filter(n=>n.toLowerCase().includes(clientSearch.toLowerCase()));
+
+  async function handleProcess(){
+    if(!transcript.trim()) return;
+    setStatus('loading');setErrorMsg('');
+    try{
+      const nameMatch=transcript.match(/(?:client|with|for)[:\s]+([A-Z][a-zA-Z\s&.'-]{2,35})/i);
+      const guessName=nameMatch?.[1]?.trim()||'';
+      const history=guessName?loadClient(guessName):null;
+      const parsed=await runAgent(transcript,history,apiKey);
+      setResult(parsed);setCheckedC([]);setCheckedM([]);
+      const cn=parsed.clientName;
+      const existing=loadClient(cn)||{sessions:[],openItems:[],profile:{}};
+      const newProfile=parsed.clientProfile||{};
+      const merged={...existing.profile};
+      Object.entries(newProfile).forEach(([k,v])=>{
+        if(k==='lastMeetingDate') return; // handled below
+        if(v&&v!=='Unknown'&&v!==''&&!(Array.isArray(v)&&v.length===0)) merged[k]=v;
+      });
+      existing.sessions.push({
+        date:parsed.meetingDate||new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}),
+        meetingType:parsed.meetingType,summary:parsed.summary,
+        notesAndQuestions:parsed.notesAndQuestions,clientNextSteps:parsed.clientNextSteps,
+        mtsTasks:parsed.mtsTasks,nextAgenda:parsed.nextAgenda,
+        followUpEmail:parsed.followUpEmail,flags:parsed.flags,ghostItems:parsed.ghostItems,
+      });
+      existing.openItems=[...(parsed.ghostItems||[]),...(parsed.mtsTasks||[]).filter(t=>/pending|follow|outstanding|need|waiting/i.test(t))].slice(0,12);
+      // Set lastMeetingDate from the most recent session date
+      var allDates = existing.sessions.map(function(s){return s.date;}).filter(Boolean);
+      merged.lastMeetingDate = allDates.length ? allDates[allDates.length-1] : '';
+      existing.profile=merged;
+      saveClient(cn,existing);refreshClients();
+      setStatus('done');persistView('result');
+      setTimeout(()=>resultRef.current?.scrollIntoView({behavior:'smooth'}),80);
+    }catch(e){console.error(e);setErrorMsg(e.message||'Something went wrong.');setStatus('error');}
+  }
+
+  async function handleBuildAgenda(){
+    if(!agendaClient.trim()) return;
+    setAgendaLoading(true);setAgendaResult('');
+    try{setAgendaResult(await runAgenda(agendaClient,loadClient(agendaClient),apiKey));}
+    catch(e){setAgendaResult('Error: '+e.message);}
+    setAgendaLoading(false);
+  }
+
+  function handleViewClient(name){
+    const data=loadClient(name);
+    persistDetail(name,data);setProfileDraft(data?.profile||{});setEditingProfile(false);persistView('clients');
+    // Auto-generate profile if sessions exist and profile is sparse
+    if(data && data.sessions && data.sessions.length > 0) {
+      var profile = data.profile || {};
+      var hasInfo = profile.notes || profile.businesses && profile.businesses.length > 0 || profile.serviceType && profile.serviceType !== 'Unknown';
+      if(!hasInfo) {
+        setGeneratingProfile(true);
+        generateClientProfile(name, data, apiKey).then(function(generated) {
+          if(!generated) return;
+          var merged = Object.assign({}, profile);
+          Object.entries(generated).forEach(function(entry) {
+            var k=entry[0], v=entry[1];
+            if(!merged[k] || merged[k]==='Unknown' || merged[k]==='' || (Array.isArray(merged[k]) && merged[k].length===0)) {
+              merged[k] = v;
+            }
+          });
+          // Always set lastMeetingDate from most recent session
+          var sessions = data.sessions || [];
+          if(sessions.length) merged.lastMeetingDate = sessions[sessions.length-1].date || '';
+          var updated = Object.assign({}, data, {profile: merged});
+          saveClient(name, updated);
+          persistDetail(name, updated);
+          setProfileDraft(merged);
+        }).catch(function(e){console.error('Profile gen error',e);}).finally(function(){setGeneratingProfile(false);});
+      }
+    }
+  }
+
+  function handleSaveName(){
+    if(!nameDraft.trim()||nameDraft.trim()===detailClient){setEditingName(false);return;}
+    const newName=nameDraft.trim();
+    const data=loadClient(detailClient);
+    deleteClient(detailClient);
+    saveClient(newName,data);
+    persistDetail(newName, data);
+    setEditingName(false);
+    refreshClients();
+  }
+
+  function handleDeleteClient(name){
+    if(!confirm('Delete all data for '+name+'?')) return;
+    deleteClient(name);refreshClients();persistDetail(null,null);
+  }
+
+  function handleSaveProfile(){
+    if(!detailClient||!detailData) return;
+    const updated={...detailData,profile:profileDraft};
+    saveClient(detailClient,updated);persistDetail(detailClient,updated);setEditingProfile(false);
+  }
+
+  const tabs=[{id:'input',label:'New Meeting'},{id:'agenda',label:'Agenda Builder'},{id:'clients',label:'Clients'+(clients.length?' ('+clients.length+')':'')}];
+
+  if(!unlocked) return h(PasswordGate,{onUnlock:()=>setUnlocked(true)});
+  if(!apiKey) return h(ApiKeyModal,{onSave:k=>{saveApiKey(k);setApiKey(k);}});
+
+  return h('div',{style:{background:C.bg,minHeight:'100vh'}},
+    // Header
+    h('div',{style:{borderBottom:'1px solid '+C.border,padding:'14px 24px',display:'flex',alignItems:'center',justifyContent:'space-between',position:'sticky',top:0,background:C.bg+'f0',backdropFilter:'blur(10px)',zIndex:20,flexWrap:'wrap',gap:10}},
+      h('div',{style:{display:'flex',alignItems:'center',gap:10}},
+        h('div',{style:{width:30,height:30,background:C.accent,borderRadius:6,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14,flexShrink:0}},'MTS'),
+        h('div',null,
+          h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:15,fontWeight:700,lineHeight:1.2,color:C.text}},'MTS Meeting Agent'),
+          h('div',{style:{fontSize:10,color:C.muted,letterSpacing:'0.06em'}},'MOMEN TAX SERVICES')
+        )
+      ),
+      h('div',{style:{display:'flex',gap:6,flexWrap:'wrap'}},
+        tabs.map(t=>h('button',{key:t.id,
+          onClick:()=>{persistView(t.id);persistDetail(null,null);setClientSearch('');},
+          style:{background:(view===t.id||(view==='result'&&t.id==='input'))?C.accent:'transparent',
+            color:(view===t.id||(view==='result'&&t.id==='input'))?C.bg:C.muted,
+            border:'1px solid '+((view===t.id||(view==='result'&&t.id==='input'))?C.accent:C.border),
+            borderRadius:6,padding:'5px 13px',fontSize:12,cursor:'pointer',fontWeight:600,fontFamily:'inherit'}},t.label)),
+        h('button',{onClick:()=>{if(confirm('Change API key?')){localStorage.removeItem('mts_anthropic_key');setApiKey('');}},
+          style:{background:'transparent',border:'1px solid '+C.border,color:C.muted,borderRadius:6,padding:'5px 10px',fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Settings')
+      )
+    ),
+    // Body
+    h('div',{style:{maxWidth:760,margin:'0 auto',padding:'28px 20px 80px'}},
+
+      // INPUT
+      view==='input'&&h('div',null,
+        h('div',{style:{marginBottom:20}},
+          h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'Process Meeting Transcript'),
+          h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.6}},'Paste a voice memo transcript, Fathom summary, or raw notes. Optionally paste the agenda at the top.')
+        ),
+        h('textarea',{value:transcript,onChange:e=>setTranscript(e.target.value),
+          placeholder:'Paste your transcript or meeting notes here...\n\nThe agent will automatically:\n• Detect the client name and meeting type\n• Pull their prior session history\n• Build/update the client profile\n• Generate all MTS outputs in one shot',
+          style:{width:'100%',minHeight:300,background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:'14px 16px',color:C.text,fontSize:13,lineHeight:1.7,fontFamily:'inherit'}}),
+        h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:12}},
+          h('span',{style:{color:C.muted,fontSize:12}},transcript.length>0?transcript.length.toLocaleString()+' chars':'Waiting for transcript'),
+          h('div',{style:{display:'flex',gap:10,alignItems:'center'}},
+            transcript&&h(Btn,{small:true,variant:'ghost',onClick:()=>setTranscript('')},'Clear'),
+            h(Btn,{onClick:handleProcess,disabled:status==='loading'||!transcript.trim()},status==='loading'?'⏳ Processing...':'Generate Summary →')
+          )
+        ),
+        status==='error'&&h('div',{style:{marginTop:14,padding:14,background:C.danger+'15',border:'1px solid '+C.danger+'44',borderRadius:8,color:C.danger,fontSize:13}},errorMsg)
+      ),
+
+      // RESULT
+      view==='result'&&result&&h('div',{ref:resultRef},
+        h('div',{style:{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:22,flexWrap:'wrap',gap:12}},
+          h('div',null,
+            h('div',{style:{display:'flex',alignItems:'center',gap:10,marginBottom:4,flexWrap:'wrap'}},
+              h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:22,fontWeight:700,color:C.text}},result.clientName),
+              h(Tag,{color:C.accent},result.meetingType||'Meeting Summary')
+            ),
+            h('div',{style:{display:'flex',gap:12,color:C.muted,fontSize:12,flexWrap:'wrap'}},
+              h('span',null,result.meetingDate),
+              result.hostedBy&&h('span',null,'· Hosted by '+result.hostedBy)
+            )
+          ),
+          h('div',{style:{display:'flex',gap:8}},
+            h(Btn,{small:true,variant:'ghost',onClick:()=>persistView('input')},'← New Meeting'),
+            h(CopyBtn,{getText:()=>formatForCopy(result,result.clientName)})
+          )
+        ),
+        h('div',{style:{background:C.card,borderRadius:10,padding:18,marginBottom:22,border:'1px solid '+C.border}},
+          h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.1em',marginBottom:8}},'OVERVIEW'),
+          h('p',{style:{color:C.text,fontSize:14,lineHeight:1.75}},result.summary)
+        ),
+        result.flags?.length>0&&h('div',{style:{background:C.warn+'10',border:'1px solid '+C.warn+'44',borderRadius:10,padding:16,marginBottom:22}},
+          h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:10}},
+            
+            h('span',{style:{color:C.warn,fontSize:11,fontWeight:700,letterSpacing:'0.1em'}},'FLAGS & WATCH ITEMS')
+          ),
+          result.flags.map((f,i)=>h('div',{key:i,style:{color:C.text,fontSize:13,lineHeight:1.6,padding:'5px 0',borderBottom:i<result.flags.length-1?'1px solid '+C.warn+'22':'none'}},'• '+f))
+        ),
+        h(Section,{icon:'',title:'Notes & Questions',items:result.notesAndQuestions}),
+        h(Section,{icon:'',title:'Client Next Steps',items:result.clientNextSteps,accent:C.success,checkable:true,checked:checkedC,onCheck:i=>setCheckedC(p=>p.includes(i)?p.filter(x=>x!==i):[...p,i])}),
+        h(Section,{icon:'',title:'MTS Tasks',items:result.mtsTasks,checkable:true,checked:checkedM,onCheck:i=>setCheckedM(p=>p.includes(i)?p.filter(x=>x!==i):[...p,i])}),
+        h(Section,{icon:'',title:'Suggested Next Agenda',items:result.nextAgenda,accent:'#7B9FD4'}),
+        result.ghostItems?.length>0&&h(Section,{icon:'',title:'Carried Forward',items:result.ghostItems,accent:C.muted}),
+        h(EmailBlock,{email:result.followUpEmail}),
+        h('div',{style:{padding:'12px 16px',background:C.success+'10',border:'1px solid '+C.success+'33',borderRadius:8,fontSize:12,color:C.success}},
+          'Saved to ',h('strong',null,result.clientName),"'s profile — client data and history updated automatically.")
+      ),
+
+      // AGENDA
+      view==='agenda'&&h('div',null,
+        h('div',{style:{marginBottom:20}},
+          h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'Agenda Builder'),
+          h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.6}},'Enter a client name and the agent builds a meeting agenda from their history and open items.')
+        ),
+        h('div',{style:{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}},
+          h('input',{value:agendaClient,onChange:e=>setAgendaClient(e.target.value),onKeyDown:e=>e.key==='Enter'&&handleBuildAgenda(),
+            placeholder:'Client name (e.g. Jakob Lively Lighting)',
+            style:{flex:1,minWidth:200,background:C.card,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit'}}),
+          h(Btn,{onClick:handleBuildAgenda,disabled:agendaLoading||!agendaClient.trim()},agendaLoading?'Building...':'Build Agenda →')
+        ),
+        clients.length>0&&h('div',{style:{marginBottom:20}},
+          h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.08em',marginBottom:8}},'KNOWN CLIENTS'),
+          h('div',{style:{display:'flex',flexWrap:'wrap',gap:6}},
+            clients.map(n=>h('button',{key:n,onClick:()=>setAgendaClient(n.replace(/\b\w/g,c=>c.toUpperCase())),
+              style:{background:agendaClient.toLowerCase()===n?C.accent:C.card,color:agendaClient.toLowerCase()===n?C.bg:C.muted,
+                border:'1px solid '+C.border,borderRadius:20,padding:'4px 12px',fontSize:12,cursor:'pointer',fontWeight:500,textTransform:'capitalize',fontFamily:'inherit'}},n))
+          )
+        ),
+        agendaResult&&h('div',{style:{background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:20}},
+          h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}},
+            h('div',{style:{display:'flex',alignItems:'center',gap:8}},
+              
+              h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:13,color:C.accent,fontWeight:600,letterSpacing:'0.08em',textTransform:'uppercase'}},'Agenda — '+agendaClient)
+            ),
+            h(CopyBtn,{getText:()=>agendaResult,label:'Copy Agenda'})
+          ),
+          h('pre',{style:{color:C.text,fontSize:13,lineHeight:1.8,whiteSpace:'pre-wrap',fontFamily:'inherit'}},agendaResult)
+        )
+      ),
+
+      // CLIENTS LIST
+      view==='clients'&&!detailData&&h('div',null,
+        h('div',{style:{marginBottom:20}},
+          h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'Client Profiles'),
+          h('p',{style:{color:C.muted,fontSize:13}},'All clients with stored session history and profile data.')
+        ),
+        h('div',{style:{position:'relative',marginBottom:16}},
+          
+          h('input',{value:clientSearch,onChange:e=>setClientSearch(e.target.value),placeholder:'Search clients...',
+            style:{width:'100%',background:C.card,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit'}}),
+          clientSearch&&h('button',{onClick:()=>setClientSearch(''),
+            style:{position:'absolute',right:10,top:'50%',transform:'translateY(-50%)',background:'none',border:'none',color:C.muted,cursor:'pointer',fontSize:16,fontFamily:'inherit'}},'×')
+        ),
+        clients.length===0?h('div',{style:{color:C.muted,fontSize:13,padding:32,textAlign:'center',border:'1px dashed '+C.border,borderRadius:10,lineHeight:1.7}},'No clients on record yet.',h('br'),'Process a meeting transcript to get started.')
+        :filteredClients.length===0?h('div',{style:{color:C.muted,fontSize:13,padding:24,textAlign:'center',border:'1px dashed '+C.border,borderRadius:10}},'No clients match "'+clientSearch+'"')
+        :h('div',{style:{display:'flex',flexDirection:'column',gap:8}},
+          filteredClients.map(name=>{
+            const data=loadClient(name);
+            const profile=data?.profile||{};
+            const sessionCount=data?.sessions?.length||0;
+            return h('button',{key:name,onClick:()=>handleViewClient(name),
+              style:{background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:'14px 18px',cursor:'pointer',textAlign:'left',display:'flex',alignItems:'center',justifyContent:'space-between',width:'100%',fontFamily:'inherit'}},
+              h('div',{style:{display:'flex',alignItems:'center',gap:12}},
+                h('div',{style:{width:38,height:38,borderRadius:'50%',background:C.accent,display:'flex',alignItems:'center',justifyContent:'center',color:C.bg,fontWeight:700,fontSize:15,flexShrink:0}},name.charAt(0).toUpperCase()),
+                h('div',null,
+                  h('div',{style:{color:C.text,fontSize:14,fontWeight:500,textTransform:'capitalize'}},name),
+                  h('div',{style:{color:C.muted,fontSize:11,marginTop:2}},
+                    profile.company&&profile.company!=='Unknown'?profile.company+(profile.industry&&profile.industry!=='Unknown'?' · '+profile.industry:''):sessionCount+' session'+(sessionCount!==1?'s':''))
+                )
+              ),
+              h('div',{style:{display:'flex',alignItems:'center',gap:8}},
+                sessionCount>0&&h(Tag,{color:C.muted},sessionCount+' session'+(sessionCount!==1?'s':'')),
+                h('span',{style:{color:C.muted,fontSize:12}},'View →')
+              )
+            );
+          })
+        )
+      ),
+
+      // CLIENT DETAIL
+      view==='clients'&&detailData&&h('div',null,
+        h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:22,flexWrap:'wrap',gap:10}},
+          h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
+            h(Btn,{small:true,variant:'ghost',onClick:()=>{setDetailData(null);setDetailClient(null);}},'← Back'),
+            editingName
+              ? h('div',{style:{display:'flex',alignItems:'center',gap:8}},
+                  h('input',{value:nameDraft,onChange:e=>setNameDraft(e.target.value),
+                    onKeyDown:e=>{if(e.key==='Enter')handleSaveName();if(e.key==='Escape'){setEditingName(false);setNameDraft(detailClient);}},
+                    autoFocus:true,
+                    style:{background:C.surface,border:'1px solid '+C.accent,borderRadius:6,padding:'4px 10px',color:C.text,fontSize:18,fontFamily:"'Playfair Display',serif",fontWeight:700,width:220}}),
+                  h(Btn,{small:true,onClick:handleSaveName},'Save'),
+                  h(Btn,{small:true,variant:'ghost',onClick:()=>{setEditingName(false);setNameDraft(detailClient);}},'Cancel')
+                )
+              : h('div',{style:{display:'flex',alignItems:'center',gap:8}},
+                  h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,textTransform:'capitalize',color:C.text}},detailClient),
+                  h('button',{onClick:()=>{setEditingName(true);setNameDraft(detailClient);},
+                    style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'2px 8px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Rename')
+                ),
+            h(Tag,{color:C.muted},(detailData.sessions?.length||0)+' sessions')
+          ),
+          h(Btn,{small:true,variant:'danger',onClick:()=>handleDeleteClient(detailClient)},'Delete Profile')
+        ),
+        // Profile
+        h('div',{style:{background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:18,marginBottom:20}},
+          h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
+            h('div',{style:{display:'flex',alignItems:'center',gap:8}},
+              
+              h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:13,color:C.accent,fontWeight:600,letterSpacing:'0.08em',textTransform:'uppercase'}},'Client Profile')
+            ),
+            h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+              generatingProfile&&h('span',{style:{color:C.muted,fontSize:11,fontStyle:'italic'}},'Generating...'),
+              !generatingProfile&&(editingProfile
+                ? h('div',{style:{display:'flex',gap:8}},
+                    h(Btn,{small:true,variant:'ghost',onClick:function(){setEditingProfile(false);setProfileDraft(detailData.profile||{});}},'Cancel'),
+                    h(Btn,{small:true,onClick:handleSaveProfile},'Save Profile')
+                  )
+                : h('div',{style:{display:'flex',gap:6}},
+                    h(Btn,{small:true,variant:'ghost',onClick:function(){setEditingProfile(true);}},'Edit'),
+                    h('button',{
+                      onClick:function(){
+                        setGeneratingProfile(true);
+                        generateClientProfile(detailClient,detailData,apiKey).then(function(generated){
+                          if(!generated) return;
+                          var merged=Object.assign({},detailData.profile||{});
+                          Object.entries(generated).forEach(function(entry){
+                            merged[entry[0]]=entry[1];
+                          });
+                          // Always set lastMeetingDate from most recent session
+                          var ss=detailData.sessions||[];
+                          if(ss.length) merged.lastMeetingDate=ss[ss.length-1].date||'';
+                          var updated=Object.assign({},detailData,{profile:merged});
+                          saveClient(detailClient,updated);
+                          persistDetail(detailClient,updated);
+                          setProfileDraft(merged);
+                        }).catch(function(e){console.error(e);}).finally(function(){setGeneratingProfile(false);});
+                      },
+                      style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'3px 10px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}
+                    },'Refresh')
+                  )
+              )
+            )
+          ),
+          h(ProfileCard,{profile:editingProfile?profileDraft:(detailData.profile||{}),editing:editingProfile,onChange:(k,v)=>setProfileDraft(p=>({...p,[k]:v}))})
+        ),
+        // Open items
+        detailData.openItems?.length>0&&h('div',{style:{background:C.warn+'10',border:'1px solid '+C.warn+'33',borderRadius:10,padding:16,marginBottom:20}},
+          h('div',{style:{color:C.warn,fontSize:11,fontWeight:700,letterSpacing:'0.08em',marginBottom:10}},'OPEN ITEMS CARRIED FORWARD'),
+          detailData.openItems.map((item,i)=>h('div',{key:i,style:{color:C.text,fontSize:13,padding:'5px 0',borderBottom:i<detailData.openItems.length-1?'1px solid '+C.warn+'22':'none',lineHeight:1.5}},'• '+item))
+        ),
+        // Sessions
+        h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
+          h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.08em'}},'SESSION HISTORY'),
+          h('div',{style:{color:C.muted,fontSize:11}},'Click a session to expand/collapse')
+        ),
+        (detailData.sessions||[]).slice().reverse().map(function(s,i,arr){
+            var realIndex = (detailData.sessions.length-1)-i;
+            return h(SessionCard,{key:i,session:s,index:i,total:arr.length,clientName:detailClient,
+              onSave:function(updated){
+                var sessions=detailData.sessions.slice();
+                sessions[realIndex]=updated;
+                var newData=Object.assign({},detailData,{sessions:sessions});
+                saveClient(detailClient,newData);
+                setDetailData(newData);
+              }
+            });
+          })
+      )
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(h(App,null));
+</script>
+</body>
+</html>

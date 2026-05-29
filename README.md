@@ -27,13 +27,13 @@ This suite consists of three tools built for MTS internal operations:
 
 ### How to access
 Hosted on GitHub Pages at:
-`https://mirianna-boop.github.io/mts-notetaker/`
+`https://miriannasaenz.github.io/mts-notetaker/`
 
 The file must be named `index.html` in the root of the repo for GitHub Pages to serve it correctly.
 
 ### First-time setup
 1. Open the URL
-2. Enter the site password: `mts2025`
+2. Enter the site password
 3. Enter your Anthropic API key (get from console.anthropic.com → API Keys)
 4. The key saves to your browser — you won't be asked again on that device
 
@@ -61,13 +61,6 @@ The file must be named `index.html` in the root of the repo for GitHub Pages to 
 - Go to **Agenda Builder** tab
 - Type a client name or click a known client
 - Click **Build Agenda** — generates from session history and open items
-
-### Changing the password
-Open `index.html` in any text editor, find:
-```
-const SITE_PASSWORD = 'mts2025';
-```
-Change the value and re-upload to GitHub.
 
 ### Data storage
 All client data is stored in your **browser's localStorage** — it persists as long as you use the same browser on the same device. It does not sync across devices. Do not use incognito mode or data will not be saved.
@@ -172,16 +165,6 @@ Separate Railway project from the EOD bot. Same deployment process — connect a
 
 ---
 
-## Costs
-| Service | Cost |
-|---|---|
-| Railway (bot hosting) | Free tier — 500 hours/month |
-| GitHub Pages (web app) | Free |
-| Anthropic API | ~$0.01–0.05 per report or summary depending on length |
-| Telegram Bot API | Free |
-
----
-
 ## Contact / Ownership
 Built for internal use at Momen Tax Services.
-Maintained by Mirianna Saenz — Operations Assistant & Social Media Lead.
+Maintained by Mirianna Saenz

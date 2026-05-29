@@ -458,7 +458,7 @@ function SbKeyModal({onSave}){
     h('div',{style:{marginBottom:8,color:C.muted,fontSize:11,fontWeight:600,letterSpacing:'0.08em'}},'SUPABASE ANON KEY'),
     h('input',{value:val,onChange:function(e){setVal(e.target.value);},onKeyDown:function(e){if(e.key==='Enter'&&val.length>10)onSave(val);},placeholder:'sb_publishable_... or eyJ...',type:'password',autoFocus:true,
       style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit',marginBottom:16}}),
-    h('button',{onClick:function(){onSave(val);},disabled:val.length<10,
+    h('button',{onClick:function(){console.log('Saving SB key:',val.slice(0,15));localStorage.setItem('mts_sb',val);onSave(val);},disabled:val.length<10,
       style:{width:'100%',background:val.length>=10?C.accent:C.accentDim,color:C.bg,border:'none',borderRadius:6,padding:'10px',fontSize:13,fontWeight:700,cursor:val.length>=10?'pointer':'not-allowed',fontFamily:'inherit'}},
       'Connect →')
   ));
@@ -494,7 +494,7 @@ function ApiKeyModal({onSave}){
 function App(){
   var [unlocked,setUnlocked]=useState(function(){return localStorage.getItem('mts_unlocked')==='true';});
   var [apiKey,setApiKey]=useState(function(){return getApiKey();});
-  var [sbKey,setSbKey]=useState(function(){return getSbKey();});
+  var [sbKey,setSbKey]=useState(function(){var k=localStorage.getItem('mts_sb');console.log('Init sbKey:',k?k.slice(0,15):'EMPTY');return k||'';});
 
   var [view,setView]=useState(function(){return getView();});
   var [clients,setClients]=useState([]);
@@ -538,8 +538,9 @@ function App(){
   },[view,sbKey]);
 
   async function loadHomeData(){
-    setHomeLoading(true);
     var key=getSbKey();
+    if(!key){console.log('loadHomeData: no key, skipping');return;}
+    setHomeLoading(true);
     try{
       var cls=await sbGet('clients',{order:'updated_at.desc',select:'name,profile',limit:'20'},key);
       setClients((cls||[]).map(function(c){return c.name;}));
@@ -562,8 +563,9 @@ function App(){
   },[detailClient,sbKey]);
 
   async function loadDetail(name){
-    setDetailLoading(true);
     var key=getSbKey();
+    if(!key){console.log('loadDetail: no key, skipping');return;}
+    setDetailLoading(true);
     try{
       var cls=await sbGet('clients',{'name':'eq.'+name,'limit':'1'},key);
       if(!cls||!cls.length){setDetailLoading(false);return;}
@@ -598,6 +600,7 @@ function App(){
 
   async function handleProcess(){
     if(!transcript.trim()) return;
+    if(!getSbKey()){alert('Supabase key not set. Click Settings to reset.');return;}
     setStatus('loading');setErrorMsg('');
     try{
       // Try to find existing client for context
@@ -756,7 +759,21 @@ function App(){
       view==='home'&&h('div',null,
         h('div',{style:{marginBottom:32}},
           h('h1',{style:{fontFamily:"'Playfair Display',serif",fontSize:28,fontWeight:700,color:C.text,marginBottom:8}},'Welcome back'),
-          h('p',{style:{color:C.muted,fontSize:14}},'What do you want to do today?')
+          h('p',{style:{color:C.muted,fontSize:14}},'What do you want to do today?'),
+          h('div',{style:{marginTop:12,padding:'10px 14px',background:C.surface,borderRadius:8,fontSize:11,color:C.muted,fontFamily:'monospace',display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}},
+            h('span',null,'SB Key: '+(getSbKey()?getSbKey().slice(0,20)+'...('+getSbKey().length+' chars)':'EMPTY — click Settings to reset')),
+            h('button',{
+              onClick:async function(){
+                var k=getSbKey();
+                if(!k){alert('No Supabase key stored. Click Settings to reset and re-enter.');return;}
+                try{
+                  var r=await fetch(SB_URL+'/rest/v1/clients?limit=1',{headers:sbH(k)});
+                  alert('Connection test: '+r.status+' '+(r.ok?'SUCCESS':'FAILED — '+r.statusText));
+                }catch(e){alert('Connection error: '+e.message);}
+              },
+              style:{background:C.accent,color:C.bg,border:'none',borderRadius:4,padding:'3px 10px',fontSize:11,cursor:'pointer',fontFamily:'inherit'}
+            },'Test Connection')
+          )
         ),
         // Nav buttons
         h('div',{style:{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,marginBottom:36}},

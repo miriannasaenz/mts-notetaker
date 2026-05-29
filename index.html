@@ -40,7 +40,10 @@ const MTS_PROMPT = 'You are a meeting summary assistant for Momen Tax Services (
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
 const SB_URL = 'https://ykowuicymemzrhhfaiqz.supabase.co';
-function sbH(k){return{'apikey':k,'Authorization':'Bearer '+k,'Content-Type':'application/json','Prefer':'return=representation'};}
+function sbH(k){
+  if(!k) console.error('Supabase key is empty!');
+  return{'apikey':k,'Authorization':'Bearer '+k,'Content-Type':'application/json','Prefer':'return=representation'};
+}
 async function sbGet(table,params,k){
   var url=SB_URL+'/rest/v1/'+table+'?';
   var qp=Object.entries(params||{}).map(function(e){return e[0]+'='+encodeURIComponent(e[1]);}).join('&');
@@ -536,10 +539,11 @@ function App(){
 
   async function loadHomeData(){
     setHomeLoading(true);
+    var key=getSbKey();
     try{
-      var cls=await sbGet('clients',{order:'updated_at.desc',select:'name,profile',limit:'20'},sbKey);
+      var cls=await sbGet('clients',{order:'updated_at.desc',select:'name,profile',limit:'20'},key);
       setClients((cls||[]).map(function(c){return c.name;}));
-      var sess=await sbGet('sessions',{order:'created_at.desc',select:'client_name,meeting_date,meeting_type,summary',limit:'5'},sbKey);
+      var sess=await sbGet('sessions',{order:'created_at.desc',select:'client_name,meeting_date,meeting_type,summary',limit:'5'},key);
       setRecentSessions(sess||[]);
     }catch(e){console.error(e);}
     setHomeLoading(false);
@@ -548,7 +552,7 @@ function App(){
   // Load clients list
   useEffect(function(){
     if(view==='clients'&&!detailClient){
-      sbGet('clients',{order:'name.asc',select:'name,profile'},sbKey).then(function(r){setClients((r||[]).map(function(c){return c.name;}));}).catch(function(e){console.error(e);});
+      sbGet('clients',{order:'name.asc',select:'name,profile'},getSbKey()).then(function(r){setClients((r||[]).map(function(c){return c.name;}));}).catch(function(e){console.error(e);});
     }
   },[view,detailClient,sbKey]);
 
@@ -559,13 +563,14 @@ function App(){
 
   async function loadDetail(name){
     setDetailLoading(true);
+    var key=getSbKey();
     try{
-      var cls=await sbGet('clients',{'name':'eq.'+name,'limit':'1'},sbKey);
+      var cls=await sbGet('clients',{'name':'eq.'+name,'limit':'1'},key);
       if(!cls||!cls.length){setDetailLoading(false);return;}
       var cl=cls[0];
-      var sess=await sbGet('sessions',{'client_id':'eq.'+cl.id,'order':'created_at.asc'},sbKey);
-      var ghosts=await sbGet('ghost_items',{'client_id':'eq.'+cl.id,'resolved':'eq.false'},sbKey);
-      var bizzes=await sbGet('businesses',{'client_id':'eq.'+cl.id,'order':'created_at.asc'},sbKey);
+      var sess=await sbGet('sessions',{'client_id':'eq.'+cl.id,'order':'created_at.asc'},key);
+      var ghosts=await sbGet('ghost_items',{'client_id':'eq.'+cl.id,'resolved':'eq.false'},key);
+      var bizzes=await sbGet('businesses',{'client_id':'eq.'+cl.id,'order':'created_at.asc'},key);
       var data={id:cl.id,profile:cl.profile||{},openItems:(ghosts||[]).map(function(g){return g.summary;}),
         sessions:(sess||[]).map(function(s){return {id:s.id,date:s.meeting_date,meetingType:s.meeting_type,attendees:s.attendees,summary:s.summary,notesAndQuestions:s.notes_and_questions,clientNextSteps:s.client_next_steps,mtsTasks:s.mts_tasks,nextAgenda:s.next_agenda,followUpEmail:s.follow_up_email,flags:s.flags,ghostItems:s.ghost_items};})};
       setDetailData(data);
@@ -581,7 +586,7 @@ function App(){
           var merged=Object.assign({},p);
           Object.entries(generated).forEach(function(kv){var k=kv[0],v=kv[1];if(!merged[k]||merged[k]==='Unknown'||merged[k]===''||(Array.isArray(merged[k])&&merged[k].length===0))merged[k]=v;});
           var ss=data.sessions||[];if(ss.length)merged.lastMeetingDate=ss[ss.length-1].date||'';
-          return sbPatch('clients',{profile:merged},{id:cl.id},sbKey).then(function(){
+          return sbPatch('clients',{profile:merged},{id:cl.id},key).then(function(){
             setDetailData(function(prev){return Object.assign({},prev,{profile:merged});});
             setProfileDraft(merged);
           });
@@ -600,14 +605,14 @@ function App(){
       setResult(parsed);setCheckedC([]);setCheckedM([]);
       var cn=parsed.clientName;
       // Upsert client
-      var existing=await sbGet('clients',{'name':'eq.'+cn,'limit':'1'},sbKey);
+      var existing=await sbGet('clients',{'name':'eq.'+cn,'limit':'1'},key);
       var clientId;
       var oldProfile={};
       if(existing&&existing.length){
         clientId=existing[0].id;
         oldProfile=existing[0].profile||{};
       } else {
-        var nc=await sbPost('clients',{name:cn,profile:{},open_items:[]},sbKey);
+        var nc=await sbPost('clients',{name:cn,profile:{},open_items:[]},key);
         clientId=nc.id;
       }
       // Merge profile
@@ -623,9 +628,9 @@ function App(){
         client_next_steps:parsed.clientNextSteps||[],mts_tasks:parsed.mtsTasks||[],
         next_agenda:parsed.nextAgenda||[],follow_up_email:parsed.followUpEmail,
         flags:parsed.flags||[],ghost_items:parsed.ghostItems||[]
-      },sbKey);
+      },key);
       merged.lastMeetingDate=parsed.meetingDate||new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
-      await sbPatch('clients',{profile:merged,updated_at:new Date().toISOString()},{id:clientId},sbKey);
+      await sbPatch('clients',{profile:merged,updated_at:new Date().toISOString()},{id:clientId},key);
       setStatus('done');nav('result');
       setTimeout(function(){resultRef.current&&resultRef.current.scrollIntoView({behavior:'smooth'});},80);
     }catch(e){console.error(e);setErrorMsg(e.message||'Something went wrong.');setStatus('error');}
@@ -634,7 +639,7 @@ function App(){
   async function handleSaveProfile(){
     if(!detailClient||!detailData) return;
     try{
-      await sbPatch('clients',{profile:profileDraft},{id:detailData.id},sbKey);
+      await sbPatch('clients',{profile:profileDraft},{id:detailData.id},getSbKey());
       setDetailData(function(p){return Object.assign({},p,{profile:profileDraft});});
       setEditingProfile(false);
     }catch(e){alert('Error saving: '+e.message);}
@@ -644,8 +649,8 @@ function App(){
     var newName=nameDraft.trim();
     if(!newName||newName===detailClient){setEditingName(false);return;}
     try{
-      await sbPatch('clients',{name:newName},{id:detailData.id},sbKey);
-      await sbPatch('sessions',{client_name:newName},{client_name:detailClient},sbKey);
+      await sbPatch('clients',{name:newName},{id:detailData.id},getSbKey());
+      await sbPatch('sessions',{client_name:newName},{client_name:detailClient},getSbKey());
       setEditingName(false);
       navClient(newName,Object.assign({},detailData));
       setDetailClientSS(newName);
@@ -655,7 +660,7 @@ function App(){
   async function handleDeleteClient(){
     if(!confirm('Delete all data for '+detailClient+'?')) return;
     try{
-      await sbDelete('clients',{id:detailData.id},sbKey);
+      await sbDelete('clients',{id:detailData.id},getSbKey());
       setDetailClient('');setDetailClientSS('');setDetailData(null);
       nav('clients');
     }catch(e){alert('Error: '+e.message);}
@@ -664,7 +669,7 @@ function App(){
   async function handleSaveSession(updated,realIndex){
     try{
       if(updated.id){
-        await sbPatch('sessions',{meeting_date:updated.date,meeting_type:updated.meetingType,summary:updated.summary,notes_and_questions:updated.notesAndQuestions||[],client_next_steps:updated.clientNextSteps||[],mts_tasks:updated.mtsTasks||[],next_agenda:updated.nextAgenda||[],follow_up_email:updated.followUpEmail,flags:updated.flags||[]},{id:updated.id},sbKey);
+        await sbPatch('sessions',{meeting_date:updated.date,meeting_type:updated.meetingType,summary:updated.summary,notes_and_questions:updated.notesAndQuestions||[],client_next_steps:updated.clientNextSteps||[],mts_tasks:updated.mtsTasks||[],next_agenda:updated.nextAgenda||[],follow_up_email:updated.followUpEmail,flags:updated.flags||[]},{id:updated.id},getSbKey());
       }
       setDetailData(function(prev){var sessions=prev.sessions.slice();sessions[realIndex]=updated;return Object.assign({},prev,{sessions:sessions});});
     }catch(e){alert('Error saving session: '+e.message);}
@@ -672,21 +677,21 @@ function App(){
 
   async function handleDeleteSession(session,realIndex){
     try{
-      if(session.id) await sbDelete('sessions',{id:session.id},sbKey);
+      if(session.id) await sbDelete('sessions',{id:session.id},getSbKey());
       setDetailData(function(prev){var sessions=prev.sessions.slice();sessions.splice(realIndex,1);return Object.assign({},prev,{sessions:sessions});});
     }catch(e){alert('Error deleting session: '+e.message);}
   }
 
   async function handleSaveBiz(biz){
     try{
-      var updated=await sbPatch('businesses',biz,{id:biz.id},sbKey);
+      var updated=await sbPatch('businesses',biz,{id:biz.id},getSbKey());
       setDetailBizzes(function(prev){return prev.map(function(b){return b.id===biz.id?(updated&&updated[0]?updated[0]:biz):b;});});
     }catch(e){alert('Error saving business: '+e.message);}
   }
 
   async function handleDeleteBiz(bizId){
     try{
-      await sbDelete('businesses',{id:bizId},sbKey);
+      await sbDelete('businesses',{id:bizId},getSbKey());
       setDetailBizzes(function(prev){return prev.filter(function(b){return b.id!==bizId;});});
     }catch(e){alert('Error: '+e.message);}
   }
@@ -694,7 +699,7 @@ function App(){
   async function handleAddBiz(){
     if(!newBiz.name.trim()) return;
     try{
-      var created=await sbPost('businesses',Object.assign({},newBiz,{client_id:detailData.id,client_name:detailClient}),sbKey);
+      var created=await sbPost('businesses',Object.assign({},newBiz,{client_id:detailData.id,client_name:detailClient}),getSbKey());
       setDetailBizzes(function(prev){return prev.concat([created]);});
       setNewBiz({name:''});setAddingBiz(false);
     }catch(e){alert('Error adding business: '+e.message);}
@@ -709,7 +714,7 @@ function App(){
         var merged=Object.assign({},detailData.profile||{});
         Object.entries(generated).forEach(function(kv){merged[kv[0]]=kv[1];});
         var ss=detailData.sessions||[];if(ss.length)merged.lastMeetingDate=ss[ss.length-1].date||'';
-        await sbPatch('clients',{profile:merged},{id:detailData.id},sbKey);
+        await sbPatch('clients',{profile:merged},{id:detailData.id},getSbKey());
         setDetailData(function(p){return Object.assign({},p,{profile:merged});});
         setProfileDraft(merged);
       }
@@ -1003,12 +1008,12 @@ function App(){
     if(!agendaClient.trim()) return;
     setAgendaLoading(true);setAgendaResult('');
     try{
-      var cls=await sbGet('clients',{name:'eq.'+agendaClient,limit:'1'},sbKey);
+      var cls=await sbGet('clients',{name:'eq.'+agendaClient,limit:'1'},getSbKey());
       var history=null;
       if(cls&&cls.length){
         var cl=cls[0];
-        var sess=await sbGet('sessions',{client_id:'eq.'+cl.id,order:'created_at.desc',limit:'3'},sbKey);
-        var gh=await sbGet('ghost_items',{client_id:'eq.'+cl.id,resolved:'eq.false',limit:'10'},sbKey);
+        var sess=await sbGet('sessions',{client_id:'eq.'+cl.id,order:'created_at.desc',limit:'3'},getSbKey());
+        var gh=await sbGet('ghost_items',{client_id:'eq.'+cl.id,resolved:'eq.false',limit:'10'},getSbKey());
         history={profile:cl.profile||{},sessions:(sess||[]).map(function(s){return {date:s.meeting_date,summary:s.summary,nextAgenda:s.next_agenda};}),openItems:(gh||[]).map(function(g){return g.summary;})};
       }
       setAgendaResult(await runAgenda(agendaClient,history,apiKey));

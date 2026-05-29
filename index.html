@@ -447,6 +447,20 @@ function BusinessesInput({value,onChange}){
 }
 
 // ── Gate screens ──────────────────────────────────────────────────────────────
+function SbKeyModal({onSave}){
+  var [val,setVal]=useState('');
+  return h('div',{className:'modal-bg'},h('div',{className:'modal'},
+    h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,marginBottom:8,color:C.text}},'Connect Database'),
+    h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.65,marginBottom:24}},'Enter your Supabase anon key to sync client data. Found in Supabase → Settings → API.'),
+    h('div',{style:{marginBottom:8,color:C.muted,fontSize:11,fontWeight:600,letterSpacing:'0.08em'}},'SUPABASE ANON KEY'),
+    h('input',{value:val,onChange:function(e){setVal(e.target.value);},onKeyDown:function(e){if(e.key==='Enter'&&val.length>10)onSave(val);},placeholder:'sb_publishable_... or eyJ...',type:'password',autoFocus:true,
+      style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit',marginBottom:16}}),
+    h('button',{onClick:function(){onSave(val);},disabled:val.length<10,
+      style:{width:'100%',background:val.length>=10?C.accent:C.accentDim,color:C.bg,border:'none',borderRadius:6,padding:'10px',fontSize:13,fontWeight:700,cursor:val.length>=10?'pointer':'not-allowed',fontFamily:'inherit'}},
+      'Connect →')
+  ));
+}
+
 function PasswordGate({onUnlock}){
   var [val,setVal]=useState('');
   var [err,setErr]=useState(false);
@@ -477,7 +491,7 @@ function ApiKeyModal({onSave}){
 function App(){
   var [unlocked,setUnlocked]=useState(function(){return localStorage.getItem('mts_unlocked')==='true';});
   var [apiKey,setApiKey]=useState(function(){return getApiKey();});
-  var sbKey=getSbKey();
+  var [sbKey,setSbKey]=useState(function(){return getSbKey();});
 
   var [view,setView]=useState(function(){return getView();});
   var [clients,setClients]=useState([]);
@@ -707,6 +721,7 @@ function App(){
 
   if(!unlocked) return h(PasswordGate,{onUnlock:function(){setUnlocked(true);}});
   if(!apiKey) return h(ApiKeyModal,{onSave:function(k){saveApiKey(k);setApiKey(k);}});
+  if(!sbKey) return h(SbKeyModal,{onSave:function(k){saveSbKey(k);setSbKey(k);}});
 
   // ── Layout ──────────────────────────────────────────────────────────────────
   return h('div',{style:{background:C.bg,minHeight:'100vh'}},

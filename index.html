@@ -40,10 +40,7 @@ const MTS_PROMPT = 'You are a meeting summary assistant for Momen Tax Services (
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
 const SB_URL = 'https://ykowuicymemzrhhfaiqz.supabase.co';
-function sbH(k){
-  if(!k) console.error('Supabase key is empty!');
-  return{'apikey':k,'Authorization':'Bearer '+k,'Content-Type':'application/json','Prefer':'return=representation'};
-}
+function sbH(k){return{'apikey':k,'Authorization':'Bearer '+k,'Content-Type':'application/json','Prefer':'return=representation'};}
 async function sbGet(table,params,k){
   var url=SB_URL+'/rest/v1/'+table+'?';
   var qp=Object.entries(params||{}).map(function(e){return e[0]+'='+encodeURIComponent(e[1]);}).join('&');
@@ -588,7 +585,7 @@ function App(){
           var merged=Object.assign({},p);
           Object.entries(generated).forEach(function(kv){var k=kv[0],v=kv[1];if(!merged[k]||merged[k]==='Unknown'||merged[k]===''||(Array.isArray(merged[k])&&merged[k].length===0))merged[k]=v;});
           var ss=data.sessions||[];if(ss.length)merged.lastMeetingDate=ss[ss.length-1].date||'';
-          return sbPatch('clients',{profile:merged},{id:cl.id},key).then(function(){
+          return sbPatch('clients',{profile:merged},{id:cl.id},getSbKey()).then(function(){
             setDetailData(function(prev){return Object.assign({},prev,{profile:merged});});
             setProfileDraft(merged);
           });
@@ -601,6 +598,7 @@ function App(){
   async function handleProcess(){
     if(!transcript.trim()) return;
     if(!getSbKey()){alert('Supabase key not set. Click Settings to reset.');return;}
+    var key=getSbKey();
     setStatus('loading');setErrorMsg('');
     try{
       // Try to find existing client for context
@@ -608,14 +606,14 @@ function App(){
       setResult(parsed);setCheckedC([]);setCheckedM([]);
       var cn=parsed.clientName;
       // Upsert client
-      var existing=await sbGet('clients',{'name':'eq.'+cn,'limit':'1'},key);
+      var existing=await sbGet('clients',{'name':'eq.'+cn,'limit':'1'},getSbKey());
       var clientId;
       var oldProfile={};
       if(existing&&existing.length){
         clientId=existing[0].id;
         oldProfile=existing[0].profile||{};
       } else {
-        var nc=await sbPost('clients',{name:cn,profile:{},open_items:[]},key);
+        var nc=await sbPost('clients',{name:cn,profile:{},open_items:[]},getSbKey());
         clientId=nc.id;
       }
       // Merge profile
@@ -631,9 +629,9 @@ function App(){
         client_next_steps:parsed.clientNextSteps||[],mts_tasks:parsed.mtsTasks||[],
         next_agenda:parsed.nextAgenda||[],follow_up_email:parsed.followUpEmail,
         flags:parsed.flags||[],ghost_items:parsed.ghostItems||[]
-      },key);
+      },getSbKey());
       merged.lastMeetingDate=parsed.meetingDate||new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
-      await sbPatch('clients',{profile:merged,updated_at:new Date().toISOString()},{id:clientId},key);
+      await sbPatch('clients',{profile:merged,updated_at:new Date().toISOString()},{id:clientId},getSbKey());
       setStatus('done');nav('result');
       setTimeout(function(){resultRef.current&&resultRef.current.scrollIntoView({behavior:'smooth'});},80);
     }catch(e){console.error(e);setErrorMsg(e.message||'Something went wrong.');setStatus('error');}
@@ -729,8 +727,6 @@ function App(){
 
   if(!unlocked) return h(PasswordGate,{onUnlock:function(){setUnlocked(true);}});
   if(!apiKey) return h(ApiKeyModal,{onSave:function(k){saveApiKey(k);setApiKey(k);}});
-  if(!sbKey) return h(SbKeyModal,{onSave:function(k){saveSbKey(k);setSbKey(k);}});
-
   // ── Layout ──────────────────────────────────────────────────────────────────
   return h('div',{style:{background:C.bg,minHeight:'100vh'}},
     // Header
@@ -758,6 +754,19 @@ function App(){
       // ── HOME ───────────────────────────────────────────────────────────────
       view==='home'&&h('div',null,
         h('div',{style:{marginBottom:32}},
+        !sbKey&&h('div',{style:{background:C.danger+'15',border:'1px solid '+C.danger+'44',borderRadius:10,padding:16,marginBottom:20}},
+          h('div',{style:{color:C.danger,fontSize:13,fontWeight:600,marginBottom:10}},'Database not connected'),
+          h('p',{style:{color:C.text,fontSize:13,marginBottom:12}},'Enter your Supabase anon key (eyJ...) to connect. Found in Supabase → Settings → API.'),
+          h('div',{style:{display:'flex',gap:10}},
+            h('input',{id:'sb-key-input',placeholder:'eyJ...',type:'password',
+              style:{flex:1,background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'8px 12px',color:C.text,fontSize:13,fontFamily:'inherit'}}),
+            h('button',{onClick:function(){
+              var k=document.getElementById('sb-key-input').value.trim();
+              if(k.length>10){saveSbKey(k);setSbKey(k);}
+              else alert('Please enter your full Supabase anon key.');
+            },style:{background:C.accent,color:C.bg,border:'none',borderRadius:6,padding:'8px 16px',fontSize:13,fontWeight:700,cursor:'pointer',fontFamily:'inherit'}},'Connect')
+          )
+        ),
           h('h1',{style:{fontFamily:"'Playfair Display',serif",fontSize:28,fontWeight:700,color:C.text,marginBottom:8}},'Welcome back'),
           h('p',{style:{color:C.muted,fontSize:14}},'What do you want to do today?'),
           h('div',{style:{marginTop:12,padding:'10px 14px',background:C.surface,borderRadius:8,fontSize:11,color:C.muted,fontFamily:'monospace',display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}},

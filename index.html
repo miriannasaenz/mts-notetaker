@@ -19,6 +19,7 @@ button:hover:not(:disabled){opacity:.8}
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px}
 .modal{background:#1E1E1E;border:1px solid #2A2A2A;border-radius:14px;padding:32px;max-width:480px;width:100%}
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -505,6 +506,7 @@ function App(){
   var [status,setStatus]=useState('idle');
   var [errorMsg,setErrorMsg]=useState('');
   var [checkedC,setCheckedC]=useState([]);
+  var [pdfLoading,setPdfLoading]=useState(false);
   var [checkedM,setCheckedM]=useState([]);
   var resultRef=useRef(null);
 
@@ -594,6 +596,36 @@ function App(){
       }
     }catch(e){console.error(e);}
     setDetailLoading(false);
+  }
+
+  async function handlePdfUpload(e){
+    var file = e.target.files&&e.target.files[0];
+    if(!file) return;
+    setPdfLoading(true);
+    try{
+      var pdfjsLib = window['pdfjs-dist/build/pdf'];
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      var arrayBuffer = await file.arrayBuffer();
+      var pdf = await pdfjsLib.getDocument({data:arrayBuffer}).promise;
+      var fullText = [];
+      for(var i=1;i<=pdf.numPages;i++){
+        var page = await pdf.getPage(i);
+        var textContent = await page.getTextContent();
+        var pageText = textContent.items.map(function(item){return item.str;}).join(' ');
+        fullText.push(pageText);
+      }
+      var extracted = fullText.join('\n\n').trim();
+      if(extracted.length > 50){
+        setTranscript(function(prev){return prev ? prev+'\n\n'+extracted : extracted;});
+      } else {
+        alert('Could not extract text from this PDF. It may be a scanned image. Please paste the text manually.');
+      }
+    }catch(ex){
+      console.error(ex);
+      alert('Error reading PDF: '+ex.message);
+    }
+    setPdfLoading(false);
+    e.target.value='';
   }
 
   async function handleProcess(){
@@ -810,6 +842,15 @@ function App(){
         h('div',{style:{marginBottom:20}},
           h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'Meeting Summary Generator'),
           h('p',{style:{color:C.muted,fontSize:13,lineHeight:1.6}},'Paste a transcript, Fathom summary, or voice memo notes. Optionally paste the agenda at the top.')
+        ),
+        h('div',{style:{marginBottom:12}},
+          h('label',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',background:C.card,border:'1px dashed '+(pdfLoading?C.accent:C.border),borderRadius:8,cursor:'pointer'}},
+            h('div',null,
+              h('div',{style:{color:pdfLoading?C.accent:C.muted,fontSize:13,fontWeight:500}},pdfLoading?'Reading PDF...':'Upload PDF(s)'),
+              h('div',{style:{color:C.muted,fontSize:11,marginTop:2}},'Upload your agenda and/or transcript — select one at a time, both will be combined. Fathom exports and agenda PDFs work great.')
+            ),
+            h('input',{type:'file',accept:'.pdf',onChange:handlePdfUpload,style:{display:'none'},disabled:pdfLoading,multiple:false})
+          )
         ),
         h('textarea',{value:transcript,onChange:function(e){setTranscript(e.target.value);},
           placeholder:'Paste your transcript or meeting notes here...\n\nThe agent will automatically:\n• Detect the client name and meeting type\n• Build/update the client profile\n• Generate all MTS outputs in one shot',

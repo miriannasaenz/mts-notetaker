@@ -846,8 +846,7 @@ function App(){
         h('div',{style:{marginBottom:12}},
           h('label',{style:{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',background:C.card,border:'1px dashed '+(pdfLoading?C.accent:C.border),borderRadius:8,cursor:'pointer'}},
             h('div',null,
-              h('div',{style:{color:pdfLoading?C.accent:C.muted,fontSize:13,fontWeight:500}},pdfLoading?'Reading PDF...':'Upload PDF(s)'),
-              h('div',{style:{color:C.muted,fontSize:11,marginTop:2}},'Upload your agenda and/or transcript — select one at a time, both will be combined. Fathom exports and agenda PDFs work great.')
+              h('div',{style:{color:pdfLoading?C.accent:C.muted,fontSize:13,fontWeight:500}},pdfLoading?'Reading PDF...':'Upload a PDF file.')
             ),
             h('input',{type:'file',accept:'.pdf',onChange:handlePdfUpload,style:{display:'none'},disabled:pdfLoading,multiple:false})
           )

@@ -539,6 +539,9 @@ function App(){
   var [detailData,setDetailData]=useState(null);
   var [detailBizzes,setDetailBizzes]=useState([]);
   var [clientSearch,setClientSearch]=useState('');
+  var [addingClient,setAddingClient]=useState(false);
+  var [newClientName,setNewClientName]=useState('');
+  var [newClientLoading,setNewClientLoading]=useState(false);
   var [editingProfile,setEditingProfile]=useState(false);
   var [profileDraft,setProfileDraft]=useState({});
   var [generatingProfile,setGeneratingProfile]=useState(false);
@@ -692,6 +695,24 @@ function App(){
       setStatus('done');nav('result');
       setTimeout(function(){resultRef.current&&resultRef.current.scrollIntoView({behavior:'smooth'});},80);
     }catch(e){console.error(e);setErrorMsg(e.message||'Something went wrong.');setStatus('error');}
+  }
+
+  async function handleAddClient(){
+    if(!newClientName.trim()) return;
+    setNewClientLoading(true);
+    try{
+      await sbPost('clients',{name:newClientName.trim(),profile:{},open_items:[]},getSbKey());
+      setNewClientName('');
+      setAddingClient(false);
+      // Navigate straight to their profile
+      setDetailClient(newClientName.trim());
+      setDetailClientSS(newClientName.trim());
+      setDetailData(null);
+      nav('clients');
+    }catch(e){
+      alert('Error creating client: '+e.message);
+    }
+    setNewClientLoading(false);
   }
 
   async function handleSaveProfile(){
@@ -958,9 +979,27 @@ function App(){
 
       // ── CLIENTS LIST ───────────────────────────────────────────────────────
       view==='clients'&&!detailClient&&h('div',null,
-        h('div',{style:{marginBottom:20}},
-          h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'All Clients'),
-          h('p',{style:{color:C.muted,fontSize:13}},'Client profiles, session history, and linked businesses.')
+        h('div',{style:{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:12}},
+          h('div',null,
+            h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'All Clients'),
+            h('p',{style:{color:C.muted,fontSize:13}},'Client profiles, session history, and linked businesses.')
+          ),
+          h('button',{onClick:function(){setAddingClient(function(v){return !v;});setNewClientName('');},
+            style:{background:addingClient?C.surface:C.accent,color:addingClient?C.muted:C.bg,border:'1px solid '+(addingClient?C.border:C.accent),borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}},
+            addingClient?'Cancel':'+ New Client')
+        ),
+        addingClient&&h('div',{style:{background:C.card,border:'1px solid '+C.accent,borderRadius:10,padding:18,marginBottom:16}},
+          h('div',{style:{color:C.accent,fontSize:11,fontWeight:700,letterSpacing:'0.08em',marginBottom:12}},'NEW CLIENT'),
+          h('div',{style:{display:'flex',gap:10}},
+            h('input',{value:newClientName,onChange:function(e){setNewClientName(e.target.value);},
+              onKeyDown:function(e){if(e.key==='Enter')handleAddClient();if(e.key==='Escape'){setAddingClient(false);setNewClientName('');}},
+              placeholder:'Full client name',autoFocus:true,
+              style:{flex:1,background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'9px 12px',color:C.text,fontSize:14,fontFamily:'inherit'}}),
+            h('button',{onClick:handleAddClient,disabled:!newClientName.trim()||newClientLoading,
+              style:{background:newClientName.trim()?C.accent:C.accentDim,color:C.bg,border:'none',borderRadius:6,padding:'9px 20px',fontSize:13,fontWeight:700,cursor:newClientName.trim()?'pointer':'not-allowed',fontFamily:'inherit'}},
+              newClientLoading?'Creating...':'Create')
+          ),
+          h('div',{style:{color:C.muted,fontSize:11,marginTop:8}},"Press Enter to create. You can fill in their profile after.")
         ),
         h('div',{style:{position:'relative',marginBottom:16}},
           h('input',{value:clientSearch,onChange:function(e){setClientSearch(e.target.value);},placeholder:'Search clients...',

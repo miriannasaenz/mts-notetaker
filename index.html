@@ -636,7 +636,8 @@ function App(){
         runProfileGen(name,data,apiKey).then(function(generated){
           if(!generated) return;
           var merged=Object.assign({},p);
-          Object.entries(generated).forEach(function(kv){var k=kv[0],v=kv[1];if(!merged[k]||merged[k]==='Unknown'||merged[k]===''||(Array.isArray(merged[k])&&merged[k].length===0))merged[k]=v;});
+          // Only auto-fill notes/overview
+          if(generated.notes&&generated.notes!=='Unknown'&&generated.notes!=='') merged.notes=generated.notes;
           var ss=data.sessions||[];if(ss.length)merged.lastMeetingDate=ss[ss.length-1].date||'';
           return sbPatch('clients',{profile:merged},{id:cl.id},'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inlrb3d1aWN5bWVtenJoaGZhaXF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAwMDI3MTAsImV4cCI6MjA5NTU3ODcxMH0.G_aiD0NWTWAvWbAaRSaMd9GN1pFlVSt3jCjXPXLfdu4').then(function(){
             setDetailData(function(prev){return Object.assign({},prev,{profile:merged});});
@@ -699,10 +700,10 @@ function App(){
         var nc=await sbPost('clients',{name:cn,profile:{},open_items:[]},'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inlrb3d1aWN5bWVtenJoaGZhaXF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAwMDI3MTAsImV4cCI6MjA5NTU3ODcxMH0.G_aiD0NWTWAvWbAaRSaMd9GN1pFlVSt3jCjXPXLfdu4');
         clientId=nc.id;
       }
-      // Merge profile
+      // Only auto-fill notes and lastMeetingDate
       var np=parsed.clientProfile||{};
       var merged=Object.assign({},oldProfile);
-      Object.entries(np).forEach(function(kv){var k=kv[0],v=kv[1];if(v&&v!=='Unknown'&&v!==''&&!(Array.isArray(v)&&v.length===0))merged[k]=v;});
+      if(np.notes&&np.notes!=='Unknown'&&np.notes!=='') merged.notes=np.notes;
       // Insert session
       var session=await sbPost('sessions',{
         client_id:clientId,client_name:cn,
@@ -814,7 +815,8 @@ function App(){
       var generated=await runProfileGen(detailClient,detailData,apiKey);
       if(generated){
         var merged=Object.assign({},detailData.profile||{});
-        Object.entries(generated).forEach(function(kv){merged[kv[0]]=kv[1];});
+        // Only auto-fill notes/overview
+        if(generated.notes&&generated.notes!=='Unknown'&&generated.notes!=='') merged.notes=generated.notes;
         var ss=detailData.sessions||[];if(ss.length)merged.lastMeetingDate=ss[ss.length-1].date||'';
         await sbPatch('clients',{profile:merged},{id:detailData.id},'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inlrb3d1aWN5bWVtenJoaGZhaXF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAwMDI3MTAsImV4cCI6MjA5NTU3ODcxMH0.G_aiD0NWTWAvWbAaRSaMd9GN1pFlVSt3jCjXPXLfdu4');
         setDetailData(function(p){return Object.assign({},p,{profile:merged});});
@@ -1222,10 +1224,8 @@ function App(){
       // Merge profile
       var np = parsed.clientProfile||{};
       var merged = Object.assign({}, detailData.profile||{});
-      Object.entries(np).forEach(function(kv){
-        var k=kv[0],v=kv[1];
-        if(v&&v!=='Unknown'&&v!==''&&!(Array.isArray(v)&&v.length===0)) merged[k]=v;
-      });
+      // Only auto-fill notes and lastMeetingDate
+      if(np.notes && np.notes !== 'Unknown' && np.notes !== '') merged.notes = np.notes;
       merged.lastMeetingDate = newSession.date;
       await sbPatch('clients',{profile:merged,updated_at:new Date().toISOString()},{id:detailData.id},key);
       // Update local state

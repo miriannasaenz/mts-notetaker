@@ -400,19 +400,26 @@ const PROFILE_FIELDS=[
 ];
 const SERVICE_TYPES=['TAS','TAS/CAS','TAS/CAS + CFO','Individual Tax Preparation','Business Tax Preparation','Business Formation'];
 
+function parseServiceTypes(value){
+  if(!value) return [];
+  // handle array (legacy), comma-separated string, or single value
+  if(Array.isArray(value)) return value.filter(Boolean);
+  return value.split(',').map(function(s){return s.trim();}).filter(Boolean);
+}
+
 function ServiceTypeSelector({value, onChange}){
   var SERVICE_TYPES=['TAS','TAS/CAS','TAS/CAS + CFO','Individual Tax Preparation','Business Tax Preparation','Business Formation'];
+  var selected = parseServiceTypes(value);
   return h('div',{style:{display:'flex',flexDirection:'column',gap:4}},
     SERVICE_TYPES.map(function(opt){
-      var selected = value ? value.split(', ').map(function(s){return s.trim();}).filter(Boolean) : [];
       var checked = selected.indexOf(opt)>=0;
       return h('label',{key:opt,style:{display:'flex',alignItems:'center',gap:8,cursor:'pointer',padding:'4px 0'}},
         h('input',{type:'checkbox',checked:checked,
-          onChange:function(e){
-            var cur = value ? value.split(', ').map(function(s){return s.trim();}).filter(Boolean) : [];
-            var next = e.target.checked
-              ? cur.indexOf(opt)<0 ? cur.concat([opt]) : cur
-              : cur.filter(function(s){return s!==opt;});
+          onChange:function(){
+            var cur = parseServiceTypes(value);
+            var next = checked
+              ? cur.filter(function(s){return s!==opt;})
+              : cur.concat([opt]);
             onChange(next.join(', '));
           },
           style:{accentColor:C.accent,cursor:'pointer',width:14,height:14}}),

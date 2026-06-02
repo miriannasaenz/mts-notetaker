@@ -398,6 +398,7 @@ const PROFILE_FIELDS=[
   {key:'serviceType',label:'Service Type'},
   {key:'lastMeetingDate',label:'Last Meeting Date'},
 ];
+const SERVICE_TYPES=['TAS','TAS/CAS','TAS/CAS + CFO','Individual Tax Preparation','Business Tax Preparation','Business Formation'];
 
 function ProfileCard({profile,editing,onChange}){
   profile=profile||{};
@@ -407,10 +408,24 @@ function ProfileCard({profile,editing,onChange}){
       PROFILE_FIELDS.map(function(f){
         return h('div',{key:f.key},
           h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},f.label.toUpperCase()),
-          h('input',{value:profile[f.key]||'',onChange:function(e){onChange(f.key,e.target.value);},
-            style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit'}})
+          f.key==='serviceType'
+            ? h('select',{value:profile[f.key]||'',onChange:function(e){onChange(f.key,e.target.value);},
+                style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:profile[f.key]?C.text:C.muted,fontSize:13,fontFamily:'inherit'}},
+                h('option',{value:''},'Select service type...'),
+                ['TAS','TAS/CAS','TAS/CAS + CFO','Individual Tax Preparation','Business Tax Preparation','Business Formation'].map(function(opt){
+                  return h('option',{key:opt,value:opt},opt);
+                })
+              )
+            : h('input',{value:profile[f.key]||'',onChange:function(e){onChange(f.key,e.target.value);},
+                style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit'}})
         );
       }),
+      h('div',null,
+        h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},'IMPLEMENTED STRATEGIES (optional)'),
+        h('textarea',{value:profile.implementedStrategies||'',onChange:function(e){onChange('implementedStrategies',e.target.value);},rows:2,
+          placeholder:'e.g. S-Corp election, Accountable Plan, Student Loan Reimbursement...',
+          style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'7px 10px',color:C.text,fontSize:13,fontFamily:'inherit',resize:'vertical'}})
+      ),
       h('div',null,
         h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.08em',marginBottom:4}},'CLIENT NOTES'),
         h('textarea',{value:profile.notes||'',onChange:function(e){onChange('notes',e.target.value);},rows:3,
@@ -430,6 +445,10 @@ function ProfileCard({profile,editing,onChange}){
           h('div',{style:{color:val(f.key)==='Unknown'?C.muted:C.text,fontSize:12,fontStyle:val(f.key)==='Unknown'?'italic':'normal'}},val(f.key))
         );
       })
+    ),
+    profile.implementedStrategies&&h('div',{style:{marginTop:8,background:C.surface,borderRadius:6,padding:'8px 10px'}},
+      h('div',{style:{color:C.muted,fontSize:10,fontWeight:700,letterSpacing:'0.06em',marginBottom:3}},'IMPLEMENTED STRATEGIES'),
+      h('div',{style:{color:C.text,fontSize:12,lineHeight:1.5}},profile.implementedStrategies)
     )
   );
 }

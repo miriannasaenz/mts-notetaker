@@ -527,6 +527,11 @@ function App(){
   var [nameDraft,setNameDraft]=useState('');
   var [detailLoading,setDetailLoading]=useState(false);
   var [addingBiz,setAddingBiz]=useState(false);
+  var [addingSession,setAddingSession]=useState(false);
+  var [sessionTranscript,setSessionTranscript]=useState('');
+  var [sessionStatus,setSessionStatus]=useState('idle');
+  var [sessionError,setSessionError]=useState('');
+  var [sessionPdfLoading,setSessionPdfLoading]=useState(false);
   var [newBiz,setNewBiz]=useState({name:''});
 
   function nav(v){setView(v);setViewSS(v);}
@@ -1042,10 +1047,55 @@ function App(){
             })
           ),
 
+          // Add Session inline
+          addingSession&&h('div',{style:{background:C.card,border:'1px solid '+C.accent,borderRadius:10,padding:18,marginBottom:16}},
+            h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
+              h('span',{style:{fontFamily:"'Playfair Display',serif",fontSize:13,color:C.accent,fontWeight:600,letterSpacing:'0.08em',textTransform:'uppercase'}},'New Session'),
+              h('button',{onClick:function(){setAddingSession(false);setSessionTranscript('');setSessionStatus('idle');setSessionError('');},
+                style:{background:'transparent',border:'1px solid '+C.border,borderRadius:4,padding:'3px 10px',color:C.muted,fontSize:11,cursor:'pointer',fontFamily:'inherit'}},'Cancel')
+            ),
+            h('label',{style:{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',background:C.surface,border:'1px dashed '+(sessionPdfLoading?C.accent:C.border),borderRadius:6,cursor:'pointer',marginBottom:10}},
+              h('div',{style:{color:sessionPdfLoading?C.accent:C.muted,fontSize:12,fontWeight:500}},sessionPdfLoading?'Reading PDF...':'Upload a PDF file.'),
+              h('input',{type:'file',accept:'.pdf',style:{display:'none'},disabled:sessionPdfLoading,onChange:async function(e){
+                var file=e.target.files&&e.target.files[0];
+                if(!file) return;
+                setSessionPdfLoading(true);
+                try{
+                  var pdfjsLib=window['pdfjs-dist/build/pdf'];
+                  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                  var ab=await file.arrayBuffer();
+                  var pdf=await pdfjsLib.getDocument({data:ab}).promise;
+                  var txt=[];
+                  for(var i=1;i<=pdf.numPages;i++){var pg=await pdf.getPage(i);var tc=await pg.getTextContent();txt.push(tc.items.map(function(it){return it.str;}).join(' '));}
+                  var extracted=txt.join(' ').trim();
+                  if(extracted.length>50){setSessionTranscript(function(prev){return prev?prev+' '+extracted:extracted;});}
+                  else alert('Could not extract text from this PDF. Please paste manually.');
+                }catch(ex){alert('Error reading PDF: '+ex.message);}
+                setSessionPdfLoading(false);
+                e.target.value='';
+              }})
+            ),
+            h('textarea',{value:sessionTranscript,onChange:function(e){setSessionTranscript(e.target.value);},
+              placeholder:'Paste transcript or notes here — the agent already knows this is for '+detailClient+'...',
+              rows:6,
+              style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:6,padding:'10px 12px',color:C.text,fontSize:13,fontFamily:'inherit',lineHeight:1.6,marginBottom:10,resize:'vertical'}}),
+            sessionStatus==='error'&&h('div',{style:{color:C.danger,fontSize:12,marginBottom:8}},sessionError),
+            sessionStatus==='done'&&h('div',{style:{color:C.success,fontSize:12,marginBottom:8}},'Session generated and saved successfully.'),
+            h('div',{style:{display:'flex',gap:10,justifyContent:'flex-end'}},
+              h(Btn,{small:true,variant:'ghost',onClick:function(){setSessionTranscript('');}},  'Clear'),
+              h(Btn,{onClick:handleAddSession,disabled:sessionStatus==='loading'||!sessionTranscript.trim()},sessionStatus==='loading'?'Generating...':'Generate & Save Session →')
+            )
+          ),
+
           // Sessions
           h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
             h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.08em'}},'SESSION HISTORY'),
-            h('div',{style:{color:C.muted,fontSize:11}},'Click to expand/collapse')
+            h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+              h('button',{onClick:function(){setAddingSession(function(v){return !v;});setSessionTranscript('');setSessionStatus('idle');setSessionError('');},
+                style:{background:addingSession?C.surface:C.accent,color:addingSession?C.muted:C.bg,border:'1px solid '+(addingSession?C.border:C.accent),borderRadius:4,padding:'3px 12px',fontSize:11,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}},
+                addingSession?'Cancel':'+ Add Session'),
+              h('div',{style:{color:C.muted,fontSize:11}},'Click session to expand/collapse')
+            )
           ),
           (detailData.sessions||[]).slice().reverse().map(function(s,i,arr){
             var realIndex=(detailData.sessions.length-1)-i;
@@ -1058,6 +1108,62 @@ function App(){
       )
     )
   );
+
+  async function handleAddSession(){
+    if(!sessionTranscript.trim()||!detailClient||!detailData) return;
+    setSessionStatus('loading'); setSessionError('');
+    try{
+      // Run agent with client context
+      var history = {sessions: detailData.sessions||[], profile: detailData.profile||{}, openItems: detailData.openItems||[]};
+      var parsed = await runAgent(sessionTranscript, history, apiKey);
+      // Force client name to current client
+      parsed.clientName = detailClient;
+      var key = getSbKey();
+      // Build session object
+      var newSession = {
+        date: parsed.meetingDate||new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}),
+        meetingType: parsed.meetingType, attendees: parsed.attendees, summary: parsed.summary,
+        notesAndQuestions: parsed.notesAndQuestions||[], clientNextSteps: parsed.clientNextSteps||[],
+        mtsTasks: parsed.mtsTasks||[], nextAgenda: parsed.nextAgenda||[],
+        followUpEmail: parsed.followUpEmail, flags: parsed.flags||[], ghostItems: parsed.ghostItems||[]
+      };
+      // Save to Supabase
+      var inserted = await sbPost('sessions',{
+        client_id: detailData.id, client_name: detailClient,
+        meeting_date: newSession.date, meeting_type: newSession.meetingType,
+        attendees: newSession.attendees, hosted_by: 'Momen Tax Services',
+        summary: newSession.summary, notes_and_questions: newSession.notesAndQuestions,
+        client_next_steps: newSession.clientNextSteps, mts_tasks: newSession.mtsTasks,
+        next_agenda: newSession.nextAgenda, follow_up_email: newSession.followUpEmail,
+        flags: newSession.flags, ghost_items: newSession.ghostItems
+      }, key);
+      if(inserted && inserted.id) newSession.id = inserted.id;
+      // Merge profile
+      var np = parsed.clientProfile||{};
+      var merged = Object.assign({}, detailData.profile||{});
+      Object.entries(np).forEach(function(kv){
+        var k=kv[0],v=kv[1];
+        if(v&&v!=='Unknown'&&v!==''&&!(Array.isArray(v)&&v.length===0)) merged[k]=v;
+      });
+      merged.lastMeetingDate = newSession.date;
+      await sbPatch('clients',{profile:merged,updated_at:new Date().toISOString()},{id:detailData.id},key);
+      // Update local state
+      setDetailData(function(prev){
+        return Object.assign({},prev,{
+          sessions:[...prev.sessions, newSession],
+          profile: merged
+        });
+      });
+      setProfileDraft(merged);
+      setSessionStatus('done');
+      setSessionTranscript('');
+      setTimeout(function(){setAddingSession(false);setSessionStatus('idle');}, 2000);
+    }catch(e){
+      console.error(e);
+      setSessionError(e.message||'Something went wrong.');
+      setSessionStatus('error');
+    }
+  }
 
   async function handleBuildAgenda(){
     if(!agendaClient.trim()) return;

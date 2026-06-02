@@ -9,7 +9,6 @@ This suite consists of three tools built for MTS internal operations:
 
 1. **MTS Meeting Agent** — a web app for processing meeting transcripts, managing client profiles, and generating meeting summaries + follow-up emails
 2. **Telegram EOD Bot** — monitors all company Telegram group chats and sends a morning debrief + end-of-day report
-3. **Telegram Client Agent** — processes Fathom meeting transcripts shared via Telegram and returns a structured debrief
 
 ---
 

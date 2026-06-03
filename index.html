@@ -1068,7 +1068,22 @@ function App(){
                 ),
             detailData&&h(Tag,{color:C.muted},(detailData.sessions&&detailData.sessions.length||0)+' sessions')
           ),
-          detailData&&h(Btn,{small:true,variant:'danger',onClick:handleDeleteClient},'Delete Profile')
+          h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+            detailData&&h('label',{style:{display:'flex',alignItems:'center',gap:8,cursor:'pointer',padding:'4px 10px',background:C.surface,border:'1px solid '+C.border,borderRadius:6}},
+              h('input',{type:'checkbox',
+                checked:!!(detailData&&detailData.profile&&detailData.profile.excludeFromReports),
+                onChange:async function(){
+                  var newVal=!(detailData.profile&&detailData.profile.excludeFromReports);
+                  var merged=Object.assign({},detailData.profile||{},{excludeFromReports:newVal});
+                  await sbPatch('clients',{profile:merged},{id:detailData.id},getSbKey());
+                  setDetailData(function(p){return Object.assign({},p,{profile:merged});});
+                  setProfileDraft(merged);
+                },
+                style:{accentColor:C.accent,cursor:'pointer',width:13,height:13}}),
+              h('span',{style:{fontSize:11,color:C.muted,fontWeight:500}},'Exclude from reports')
+            ),
+            detailData&&h(Btn,{small:true,variant:'danger',onClick:handleDeleteClient},'Delete Profile')
+          )
         ),
         detailLoading?h('div',{style:{color:C.muted,fontSize:13,padding:20}},'Loading...')
         :detailData&&h('div',null,

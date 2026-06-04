@@ -244,7 +244,8 @@ function SessionCard({session:s,index,total,clientName,onSave,onDelete}){
           :h('div',{style:{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}},
               h('span',{style:{color:C.accent,fontSize:13,fontWeight:600}},s.date),
               s.meetingType&&h(Tag,{color:C.accent},s.meetingType),
-              s.flags&&s.flags.length>0&&h(Tag,{color:C.warn},s.flags.length+' flag'+(s.flags.length>1?'s':''))
+              s.flags&&s.flags.length>0&&h(Tag,{color:C.warn},s.flags.length+' flag'+(s.flags.length>1?'s':'')),
+              s.followUpEmail&&!s.emailSentAt&&h(Tag,{color:C.warn},'Email Pending')
             )
       ),
       h('div',{style:{display:'flex',alignItems:'center',gap:8,flexShrink:0}},
@@ -300,7 +301,13 @@ function SessionCard({session:s,index,total,clientName,onSave,onDelete}){
             style:{width:'100%',background:C.surface,border:'1px solid '+C.border,borderRadius:4,padding:'6px 10px',color:C.text,fontSize:12,fontFamily:'inherit',lineHeight:1.65,resize:'vertical'}})
         )
         :s.followUpEmail&&h('div',{style:{background:C.surface,borderRadius:6,padding:'10px 14px',border:'1px solid '+C.border}},
-          h('div',{style:{color:C.accent,fontSize:11,fontWeight:700,marginBottom:6}},'SUBJECT: '+s.followUpEmail.subject),
+          h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}},
+            h('div',{style:{color:C.accent,fontSize:11,fontWeight:700}},'SUBJECT: '+s.followUpEmail.subject),
+            s.emailSentAt
+              ?h('span',{style:{color:C.success,fontSize:10,fontWeight:600}},'Sent '+s.emailSentAt)
+              :h('button',{onClick:function(){onSave(Object.assign({},s,{emailSentAt:new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}));},
+                  style:{background:C.success+'18',color:C.success,border:'1px solid '+C.success+'44',borderRadius:4,padding:'2px 10px',fontSize:10,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}},'Mark as Sent')
+          ),
           h('pre',{style:{color:C.text,fontSize:12,lineHeight:1.65,whiteSpace:'pre-wrap',fontFamily:'inherit'}},s.followUpEmail.body)
         )
       ),
@@ -580,6 +587,11 @@ function App(){
   var [detailBizzes,setDetailBizzes]=useState([]);
   var [clientSearch,setClientSearch]=useState('');
   var [addingClient,setAddingClient]=useState(false);
+  var [sessionSearch,setSessionSearch]=useState('');
+  var [sessionSearchResults,setSessionSearchResults]=useState([]);
+  var [sessionSearchLoading,setSessionSearchLoading]=useState(false);
+  var [activityClients,setActivityClients]=useState([]);
+  var [activityLoading,setActivityLoading]=useState(false);
   var [newClientName,setNewClientName]=useState('');
   var [newClientLoading,setNewClientLoading]=useState(false);
   var [editingProfile,setEditingProfile]=useState(false);
@@ -738,6 +750,56 @@ function App(){
     }catch(e){console.error(e);setErrorMsg(e.message||'Something went wrong.');setStatus('error');}
   }
 
+  async function handleSearchSessions(){
+    if(!sessionSearch.trim()) return;
+    setSessionSearchLoading(true);
+    setSessionSearchResults([]);
+    try{
+      var key=getSbKey();
+      var q=sessionSearch.trim().toLowerCase();
+      // Fetch recent sessions and filter client-side for flexibility
+      var sessions=await sbGet('sessions',{
+        order:'created_at.desc',
+        limit:'200',
+        select:'id,client_name,meeting_date,meeting_type,summary,notes_and_questions,client_next_steps,mts_tasks,flags'
+      },key);
+      var results=[];
+      (sessions||[]).forEach(function(s){
+        var fields=[
+          s.summary||'',
+          (s.notes_and_questions||[]).join(' '),
+          (s.client_next_steps||[]).join(' '),
+          (s.mts_tasks||[]).join(' '),
+          (s.flags||[]).join(' '),
+        ].join(' ').toLowerCase();
+        if(fields.indexOf(q)>=0){
+          // Find matching snippet
+          var idx=fields.indexOf(q);
+          var snippet=fields.slice(Math.max(0,idx-40),idx+80).trim();
+          results.push({
+            clientName:s.client_name,
+            date:s.meeting_date,
+            meetingType:s.meeting_type,
+            sessionId:s.id,
+            snippet:'...'+snippet+'...'
+          });
+        }
+      });
+      setSessionSearchResults(results);
+    }catch(e){console.error(e);}
+    setSessionSearchLoading(false);
+  }
+
+  async function loadActivityTimeline(){
+    setActivityLoading(true);
+    try{
+      var key=getSbKey();
+      var cls=await sbGet('clients',{order:'updated_at.desc',select:'name,profile,updated_at'},key);
+      setActivityClients(cls||[]);
+    }catch(e){console.error(e);}
+    setActivityLoading(false);
+  }
+
   async function handleAddClient(){
     if(!newClientName.trim()) return;
     setNewClientLoading(true);
@@ -860,9 +922,9 @@ function App(){
         )
       ),
       h('div',{style:{display:'flex',gap:6,flexWrap:'wrap'}},
-        [{id:'home',label:'Home'},{id:'new-meeting',label:'New Meeting'},{id:'agenda',label:'Agenda Builder'},{id:'clients',label:'All Clients'}].map(function(t){
+        [{id:'home',label:'Home'},{id:'new-meeting',label:'New Meeting'},{id:'agenda',label:'Agenda Builder'},{id:'clients',label:'All Clients'},{id:'search',label:'Search'},{id:'activity',label:'Activity'}].map(function(t){
           var active=(view===t.id)||(view==='result'&&t.id==='new-meeting')||(view==='clients'&&t.id==='clients');
-          return h('button',{key:t.id,onClick:function(){if(t.id==='clients'){setDetailClient('');setDetailClientSS('');setDetailData(null);}nav(t.id);},
+          return h('button',{key:t.id,onClick:function(){if(t.id==='clients'){setDetailClient('');setDetailClientSS('');setDetailData(null);}if(t.id==='activity'){loadActivityTimeline();}nav(t.id);},
             style:{background:active?C.accent:'transparent',color:active?C.bg:C.muted,border:'1px solid '+(active?C.accent:C.border),borderRadius:6,padding:'5px 13px',fontSize:12,cursor:'pointer',fontWeight:600,fontFamily:'inherit'}},t.label);
         }),
         h('button',{onClick:function(){if(confirm('Reset all keys? You will need to re-enter your Anthropic and Supabase keys.')){localStorage.removeItem('mts_ak');localStorage.removeItem('mts_sb');setApiKey('');setSbKey('');}},
@@ -1227,7 +1289,86 @@ function App(){
             });
           })
         )
+      ),
+
+    // ── SESSION SEARCH ────────────────────────────────────────────────────
+    view==='search'&&h('div',null,
+      h('div',{style:{marginBottom:20}},
+        h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'Search Sessions'),
+        h('p',{style:{color:C.muted,fontSize:13}},'Search across all client sessions — summaries, notes, tasks, and flags.')
+      ),
+      h('div',{style:{display:'flex',gap:10,marginBottom:20}},
+        h('input',{value:sessionSearch,onChange:function(e){setSessionSearch(e.target.value);},
+          onKeyDown:function(e){if(e.key==='Enter')handleSearchSessions();},
+          placeholder:'e.g. "balance sheet" or "IRS notice"',
+          style:{flex:1,background:C.card,border:'1px solid '+C.border,borderRadius:8,padding:'10px 14px',color:C.text,fontSize:13,fontFamily:'inherit'}}),
+        h(Btn,{onClick:handleSearchSessions,disabled:sessionSearchLoading||!sessionSearch.trim()},sessionSearchLoading?'Searching...':'Search →')
+      ),
+      sessionSearchResults.length>0&&h('div',null,
+        h('div',{style:{color:C.muted,fontSize:11,fontWeight:700,letterSpacing:'0.08em',marginBottom:12}},
+          sessionSearchResults.length+' result'+(sessionSearchResults.length!==1?'s':'')+' for "'+sessionSearch+'"'),
+        sessionSearchResults.map(function(r,i){
+          return h('div',{key:i,
+            onClick:function(){setDetailClient(r.clientName);setDetailClientSS(r.clientName);setDetailData(null);nav('clients');},
+            style:{background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:'14px 18px',marginBottom:8,cursor:'pointer'}},
+            h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6,flexWrap:'wrap',gap:8}},
+              h('div',{style:{display:'flex',alignItems:'center',gap:10}},
+                h('div',{style:{fontFamily:"'Playfair Display',serif",fontSize:14,fontWeight:700,color:C.text}},r.clientName),
+                r.meetingType&&h(Tag,{color:C.accent},r.meetingType)
+              ),
+              h('span',{style:{color:C.muted,fontSize:12}},r.date)
+            ),
+            h('div',{style:{color:C.muted,fontSize:12,lineHeight:1.6,fontStyle:'italic'}},r.snippet)
+          );
+        })
+      ),
+      !sessionSearchLoading&&sessionSearch&&sessionSearchResults.length===0&&h('div',{style:{color:C.muted,fontSize:13,padding:24,textAlign:'center',border:'1px dashed '+C.border,borderRadius:10}},'No sessions found for "'+sessionSearch+'"')
+    ),
+
+    // ── ACTIVITY TIMELINE ─────────────────────────────────────────────────
+    view==='activity'&&h('div',null,
+      h('div',{style:{marginBottom:20}},
+        h('h2',{style:{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:700,marginBottom:6,color:C.text}},'Client Activity'),
+        h('p',{style:{color:C.muted,fontSize:13}},'All clients sorted by most recent activity.')
+      ),
+      activityLoading?h('div',{style:{color:C.muted,fontSize:13,padding:20}},'Loading...')
+      :h('div',null,
+        h('div',{style:{display:'flex',gap:16,padding:'10px 14px',background:C.surface,borderRadius:8,marginBottom:16,flexWrap:'wrap'}},
+          [{color:C.success,label:'Within 7 days'},{color:C.accent,label:'Within 30 days'},{color:C.warn,label:'30-60 days'},{color:C.muted,label:'60+ days'}]
+          .map(function(item,i){
+            return h('div',{key:i,style:{display:'flex',alignItems:'center',gap:6}},
+              h('div',{style:{width:8,height:8,borderRadius:'50%',background:item.color,flexShrink:0}}),
+              h('span',{style:{color:C.muted,fontSize:11}},item.label)
+            );
+          })
+        ),
+        h('div',{style:{display:'flex',flexDirection:'column',gap:6}},
+          activityClients.map(function(cl,i){
+            var profile=cl.profile||{};
+            var updated=cl.updated_at?new Date(cl.updated_at):null;
+            var now=new Date();
+            var daysAgo=updated?Math.floor((now-updated)/(1000*60*60*24)):999;
+            var dotColor=daysAgo<=7?C.success:daysAgo<=30?C.accent:daysAgo<=60?C.warn:C.muted;
+            var label=daysAgo===0?'Today':daysAgo===1?'Yesterday':daysAgo<=7?daysAgo+'d ago':daysAgo<=30?daysAgo+'d ago':daysAgo<=60?'30-60d ago':'60d+ ago';
+            return h('div',{key:i,
+              onClick:function(){setDetailClient(cl.name);setDetailClientSS(cl.name);setDetailData(null);nav('clients');},
+              style:{background:C.card,border:'1px solid '+C.border,borderRadius:10,padding:'12px 18px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:8}},
+              h('div',{style:{display:'flex',alignItems:'center',gap:12}},
+                h('div',{style:{width:10,height:10,borderRadius:'50%',background:dotColor,flexShrink:0}}),
+                h('div',null,
+                  h('div',{style:{color:C.text,fontSize:14,fontWeight:500}},cl.name),
+                  profile.serviceType&&h('div',{style:{color:C.muted,fontSize:11,marginTop:2}},profile.serviceType)
+                )
+              ),
+              h('div',{style:{display:'flex',alignItems:'center',gap:16}},
+                profile.lastMeetingDate&&h('span',{style:{color:C.muted,fontSize:11}},'Last meeting: '+profile.lastMeetingDate),
+                h('span',{style:{color:dotColor,fontSize:11,fontWeight:600}},label)
+              )
+            );
+          })
+        )
       )
+    )
     )
   );
 
